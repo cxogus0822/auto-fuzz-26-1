@@ -23,7 +23,7 @@ class SeedQueue:
         seed.id = seed_id
         heapq.heappush(self.queue, (-seed.priority, seed))
 
-    # ✅ 메시지 단위 그룹 push
+    # 메시지 단위 그룹 push
     def push_group(self, seeds: List[Seed]):
         """메시지 단위 Seed 그룹을 모두 추가"""
         for seed in seeds:

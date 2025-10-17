@@ -12,7 +12,7 @@ class SignalMeta:
     length: Optional[int] = None
     byte_order: Optional[str] = None
     is_signed: Optional[bool] = None
-    factor: Optional[float] = None   # ✅ scale → factor로 변경
+    factor: Optional[float] = None      # scale → factor로 변경
     offset: Optional[float] = None
     minimum: Optional[float] = None
     maximum: Optional[float] = None
@@ -106,7 +106,7 @@ class SeedManager:
     def close(self):
         self.conn.close()
 
-    # ✅ 메시지 단위 그룹 반환 (List[List[Seed]])
+    # 메시지 단위 그룹 반환 (List[List[Seed]])
     @staticmethod
     def from_dbc(parsed_dbc: Dict[str, Any]) -> List[List["Seed"]]:
         """DbcParser.parse() 결과(dict)를 메시지 단위 Seed 그룹으로 변환"""
