@@ -1,3 +1,4 @@
+# src/cli.py
 import click
 from pipeline import AutoFuzzPipeline
 
