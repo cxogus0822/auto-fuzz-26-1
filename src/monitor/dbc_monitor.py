@@ -1,4 +1,4 @@
-# src/monitor/dbc_monitor_bool.py
+# src/monitor/dbc_monitor.py
 # DBC 기반 1-bit 신호 모니터
 
 import time
@@ -6,6 +6,7 @@ import can
 import cantools
 from typing import Dict, Any, Optional, List
 from logger.base_logger import log_event
+from seeds.seed_manager import SeedManager
 
 
 CAN_CHANNEL = "can0"
@@ -15,19 +16,32 @@ TARGET_ID   = 0x366               # Blinkmodi_02
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DBCMonitor:
-    """
-    - decode/type check: 디코드 실패는 즉시 FAIL
-    - (선택) range check: min/max(보통 0/1) — enum과 동일 효과
-    - (선택) monotonic: "nondecreasing" 또는 "nonincreasing"
-      * nondecreasing: 1→0 금지 (0->1은 허용, '한 번 켜지면 유지')
-      * nonincreasing: 0→1 금지 (1->0은 허용, '한 번 꺼지면 유지')
-    """
+    def _infer_rules_from_seeds(self, seeds, target_id):
+        rules = {}
+        for sd in seeds:
+            if sd.message_id != target_id:
+                continue
+            meta = sd.metadata or {}
+            length = getattr(meta, "length", None) or (meta.get("length") if isinstance(meta, dict) else None)
+            if length != 1:
+                continue
 
+            mn = (meta.minimum if hasattr(meta, "minimum") else meta.get("minimum", 0))
+            mx = (meta.maximum if hasattr(meta, "maximum") else meta.get("maximum", 1))
+            enum_vals = meta.get("enum", [0, 1])  # 메타에 enum이 있으면 그대로 사용
+
+            rule = {"enum": enum_vals, "min": mn, "max": mx}
+
+            rules[sd.signal_name] = rule
+        return rules
+    
     def __init__(self,
                  channel: str = CAN_CHANNEL,
                  dbc_path: str = DBC_PATH,
                  target_id: int = TARGET_ID,
-                 rules: Optional[Dict[str, Dict[str, Any]]] = None):
+                 rules: Optional[Dict[str, Dict[str, Any]]] = None,
+                 seed_db_path: str = "db/seeds.sqlite" 
+                 ):
         self.channel = channel
         self.dbc_path = dbc_path
         self.target_id = target_id
@@ -39,6 +53,15 @@ class DBCMonitor:
         self.msg_def = self.db.get_message_by_frame_id(self.target_id)
         if self.msg_def is None:
             raise ValueError(f"DBC에 ID 0x{self.target_id:X} 메시지 정의가 없습니다.")
+        
+        # Seed DB에서 규칙 자동 구성
+        if not self.rules:
+            manager = SeedManager(seed_db_path)
+            seeds = manager.get_all()
+            self.rules = self._infer_rules_from_seeds(seeds, self.target_id)
+            print(f"[INFO] Seed DB로부터 {len(self.rules)}개의 신호 규칙을 불러왔습니다.")
+            if not self.rules:
+                print("[WARN] Seed DB에서 규칙을 찾지 못했습니다. 검증 없이 모니터링을 진행합니다.")
 
         # 내부 상태
         self._prev_values: Dict[str, int] = {}  # 각 신호의 직전 값(0/1)
@@ -46,7 +69,7 @@ class DBCMonitor:
 
     # ─────────────────────────────────────────────────────────────────────────
     def start(self):
-        print(f"[ INFO ] DBCBoolMonitor: 0x{self.target_id:X} on {self.channel}")
+        print(f"[ INFO ] DBCMonitor: 0x{self.target_id:X} on {self.channel}")
         print(f"         DBC={self.dbc_path}, signals={list(self.rules.keys()) or '—'}")
 
         while True:
@@ -55,7 +78,8 @@ class DBCMonitor:
                 continue
 
             try:
-                decoded = self.msg_def.decode(bytes(msg.data), decode_choices=True, scaling=True)
+                # choices를 숫자로 받기 위해 False 권장
+                decoded = self.msg_def.decode(bytes(msg.data), decode_choices=False, scaling=True)
             except Exception as e:
                 self._emit("decode_error", "_frame", str(e), "FAIL")
                 print(f"[FAIL] decode_error: {e}")
@@ -68,8 +92,15 @@ class DBCMonitor:
                     print(f"[FAIL] {sig}: missing in decoded")
                     continue
 
-                # bool로 강제 캐스팅(0/1), float로 오더라도 정규화
-                val = int(float(decoded[sig]))
+                # bool로 강제 캐스팅(0/1), float로 오더라도 정규화, 타입 일관성 보장
+                try:
+                    val = int(float(decoded[sig]))
+                except Exception:
+                    # 혹시라도 문자열/예외가 들어오면 방어
+                    self._emit("type_cast", sig, decoded[sig], "FAIL")
+                    print(f"[FAIL] {sig}: cannot cast value={decoded[sig]!r} to int")
+                    continue
+
                 self._check_bool_rules(sig, val, rule)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -104,7 +135,7 @@ class DBCMonitor:
         ev = {
             "type": "dbc",
             "id": self.target_id,
-            "metric": metric,   # enum | range | monotonic | decode_error | missing_signal
+            "metric": metric,   # enum | range 
             "signal": sig,
             "value": value,
             "status": status,
