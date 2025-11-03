@@ -2,4 +2,4 @@ python-can
 cantools
 pytest
 can-isotp
-YAML
+PyYAML
