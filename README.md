@@ -63,7 +63,7 @@ git remote -v
 
 #### 3️⃣ 원본 최신 dev 가져오기
 ```bash
-git fetch upstream
+git pull upstream dev
 ```
 #### 4️⃣ 내 dev를 원본과 동일하게 맞추기
 * reset, 기록 덮어쓰는 과정
