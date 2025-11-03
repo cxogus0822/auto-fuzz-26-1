@@ -1,47 +1,69 @@
 # src/monitor/dbc_monitor.py
-# DBC 기반 1-bit 신호 모니터
+# DBC 기반 신호 모니터 (1-bit + multi-bit, monotonic, raise on errors)
 
 import time
 import can
 import cantools
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from logger.base_logger import log_event
 from seeds.seed_manager import SeedManager
 
 
 CAN_CHANNEL = "can0"
-DBC_PATH    = "db/your.ecu.dbc"   # 실제 경로로 교체
-TARGET_ID   = 0x366               # Blinkmodi_02
-
-# ─────────────────────────────────────────────────────────────────────────────
+DBC_PATH    = "db/your.ecu.dbc"   
+TARGET_ID   = 0x366               
+Number = Union[int, float]
 
 class DBCMonitor:
-    def _infer_rules_from_seeds(self, seeds, target_id):
-        rules = {}
+    # ─────────────────────────────────────────────────────────────────────
+    def _infer_rules_from_seeds(self, seeds, target_id): # Seed db에서 규칙 자동생성
+        rules: Dict[str, Dict[str, Any]] = {}
         for sd in seeds:
             if sd.message_id != target_id:
                 continue
-            meta = sd.metadata or {}
-            length = getattr(meta, "length", None) or (meta.get("length") if isinstance(meta, dict) else None)
-            if length != 1:
-                continue
 
-            mn = (meta.minimum if hasattr(meta, "minimum") else meta.get("minimum", 0))
-            mx = (meta.maximum if hasattr(meta, "maximum") else meta.get("maximum", 1))
-            enum_vals = meta.get("enum", [0, 1])  # 메타에 enum이 있으면 그대로 사용
+            meta = getattr(sd, "metadata", {}) or {}
+            def m(key, default=None): # 메타 접근 헬퍼 함수 : dict/객체 양쪽을 동일하게 다룸
+                if isinstance(meta, dict):
+                    return meta.get(key, default)
+                return getattr(meta, key, default)
 
-            rule = {"enum": enum_vals, "min": mn, "max": mx}
+            length  = m("length")
+            factor  = m("factor")
+            minimum = m("minimum")
+            maximum = m("maximum")
+            enum    = m("enum")
+            mono    = m("monotonic")
 
-            rules[sd.signal_name] = rule
-        return rules
-    
+            if length == 1: # 1-bit 신호 불린 판단
+                kind = "bool"; coerce_int = True # 오차 허용 불필요 항상 int 강제
+                default_enum = [0, 1]; default_min, default_max = 0, 1 # 기본 불린 규칙 설정
+            else:
+                if factor not in (None, 0, 1):
+                    kind = "float"; coerce_int = False
+                else:
+                    kind = "int"; coerce_int = True
+                default_enum = None
+                default_min, default_max = minimum, maximum
+
+            rule = { # 추론된 규칙 생성
+                "kind": kind,
+                "enum": enum if enum is not None else default_enum,
+                "min": default_min,
+                "max": default_max,
+                "monotonic": mono if mono in ("nondecreasing", "nonincreasing") else None,
+                "coerce_int": coerce_int,
+            }
+            rules[sd.signal_name] = rule # 신호명 규칙 매핑에 추가
+        return rules # 규칙 반환
+
+    # ─────────────────────────────────────────────────────────────────────
     def __init__(self,
                  channel: str = CAN_CHANNEL,
                  dbc_path: str = DBC_PATH,
                  target_id: int = TARGET_ID,
                  rules: Optional[Dict[str, Dict[str, Any]]] = None,
-                 seed_db_path: str = "db/seeds.sqlite" 
-                 ):
+                 seed_db_path: str = "db/seeds.sqlite"):
         self.channel = channel
         self.dbc_path = dbc_path
         self.target_id = target_id
@@ -52,8 +74,8 @@ class DBCMonitor:
         self.db  = cantools.database.load_file(self.dbc_path)
         self.msg_def = self.db.get_message_by_frame_id(self.target_id)
         if self.msg_def is None:
-            raise ValueError(f"DBC에 ID 0x{self.target_id:X} 메시지 정의가 없습니다.")
-        
+            raise ValueError(f"DBC에 ID 0x{self.target_id:X} 메시지 정의가 없습니다.") # 해당 메시지 없을 경우 예외 처리
+
         # Seed DB에서 규칙 자동 구성
         if not self.rules:
             manager = SeedManager(seed_db_path)
@@ -64,10 +86,10 @@ class DBCMonitor:
                 print("[WARN] Seed DB에서 규칙을 찾지 못했습니다. 검증 없이 모니터링을 진행합니다.")
 
         # 내부 상태
-        self._prev_values: Dict[str, int] = {}  # 각 신호의 직전 값(0/1)
+        self._prev_values: Dict[str, Number] = {}  # 직전값(단조성 검사용)
         self.events: List[Dict[str, Any]] = []
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────
     def start(self):
         print(f"[ INFO ] DBCMonitor: 0x{self.target_id:X} on {self.channel}")
         print(f"         DBC={self.dbc_path}, signals={list(self.rules.keys()) or '—'}")
@@ -77,66 +99,97 @@ class DBCMonitor:
             if not msg or msg.arbitration_id != self.target_id:
                 continue
 
+            # 디코드 실패는 즉시 예외로 올림
             try:
-                # choices를 숫자로 받기 위해 False 권장
                 decoded = self.msg_def.decode(bytes(msg.data), decode_choices=False, scaling=True)
             except Exception as e:
                 self._emit("decode_error", "_frame", str(e), "FAIL")
-                print(f"[FAIL] decode_error: {e}")
-                continue
+                raise RuntimeError(f"DBC decode 실패: {e}") from e
 
             # 신호별 검사
             for sig, rule in self.rules.items():
                 if sig not in decoded:
                     self._emit("missing_signal", sig, None, "FAIL")
-                    print(f"[FAIL] {sig}: missing in decoded")
-                    continue
+                    raise RuntimeError(f"신호 누락: {sig} - DBC에 정의된 신호가 디코딩 결과에 없습니다.")
 
-                # bool로 강제 캐스팅(0/1), float로 오더라도 정규화, 타입 일관성 보장
+                raw = decoded[sig]
+
+                # 타입 정규화 실패는 즉시 예외
                 try:
-                    val = int(float(decoded[sig]))
-                except Exception:
-                    # 혹시라도 문자열/예외가 들어오면 방어
-                    self._emit("type_cast", sig, decoded[sig], "FAIL")
-                    print(f"[FAIL] {sig}: cannot cast value={decoded[sig]!r} to int")
-                    continue
+                    val = self._normalize_value(raw, rule)
+                except Exception as e:
+                    self._emit("type_cast", sig, raw, "FAIL")
+                    raise ValueError(f"type cast 실패: signal={sig}, value={raw!r}") from e
 
-                self._check_bool_rules(sig, val, rule)
+                self._check_rules(sig, val, rule)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    def _check_bool_rules(self, sig: str, val: int, rule: Dict[str, Any]):
-        # 1) decode/type check는 상위에서 처리됨 (여기선 값 기준 검증)
+    # ─────────────────────────────────────────────────────────────────────
+    def _normalize_value(self, raw: Any, rule: Dict[str, Any]) -> Number: # 규칙에 맞춰 값을 bool/int/float로 정규화
+        kind = rule.get("kind", "int")
+        if kind == "bool":
+            v = int(float(raw))
+            return 1 if v != 0 else 0  # 안전한 0/1화
+        if kind == "int":
+            if rule.get("coerce_int", True):
+                return int(float(raw))
+            if isinstance(raw, int):
+                return raw
+            return int(raw) if (isinstance(raw, float) and raw.is_integer()) else raw
+        # float
+        return float(raw)
 
-        # 2) enum
-        allowed = set(rule.get("enum", [0, 1]))  # 기본 0/1 허용
-        if val not in allowed:
-            self._emit("enum", sig, val, "FAIL")
-            print(f"[FAIL] {sig}: {val} not in {sorted(allowed)}")
-            # enum 위반 시 추가 검사 의미 없음
-            self._prev_values[sig] = val
-            return
-        else:
-            self._emit("enum", sig, val, "OK")
+    # ─────────────────────────────────────────────────────────────────────
+    def _check_rules(self, sig: str, val: Number, rule: Dict[str, Any]):
 
-        # 3) range 확인 — 보통 0~1로 enum과 동일 효과
-        if "min" in rule or "max" in rule:
-            mn = rule.get("min", 0)
-            mx = rule.get("max", 1)
-            status = "OK" if (mn <= val <= mx) else "FAIL"
-            self._emit("range", sig, val, status)
-            if status == "FAIL":
-                print(f"[FAIL] {sig}: {val} out of [{mn}, {mx}]")
+        #enum 검사
+        enum_vals = rule.get("enum")
+        if enum_vals is not None:
+            if rule.get("kind") == "float":
+                ok = any(float(val) == float(a) for a in enum_vals)
+            else:
+                ok = val in set(int(a) for a in enum_vals)
 
-        # 상태 갱신
-        self._prev_values[sig] = val
+            self._emit("enum", sig, val, "OK" if ok else "FAIL")
+            if not ok:
+                raise RuntimeError(f"enum 위반: {sig} value={val}, 허용={enum_vals}")
 
-    # ─────────────────────────────────────────────────────────────────────────
+        # range 검사
+        mn, mx = rule.get("min"), rule.get("max")
+
+        if mn is not None and float(val) < float(mn):
+            self._emit("range", sig, val, "FAIL")
+            raise RuntimeError(f"range 하한 위반: {sig} value={val}, min={mn}")
+
+        if mx is not None and float(val) > float(mx):
+            self._emit("range", sig, val, "FAIL")
+            raise RuntimeError(f"range 상한 위반: {sig} value={val}, max={mx}")
+
+        self._emit("range", sig, val, "OK")
+
+        # 단조성 검사
+        mode = rule.get("monotonic")
+        if mode:
+            prev = self._prev_values.get(sig)
+            if prev is not None:
+                pv = float(prev)
+                cv = float(val)
+                if mode == "nondecreasing" and cv < pv:
+                    self._emit("monotonic", sig, {"prev": prev, "cur": val, "mode": mode}, "FAIL")
+                    raise RuntimeError(f"단조성 위반: {sig} {prev} → {val} (nondecreasing)")
+                if mode == "nonincreasing" and cv > pv:
+                    self._emit("monotonic", sig, {"prev": prev, "cur": val, "mode": mode}, "FAIL")
+                    raise RuntimeError(f"단조성 위반: {sig} {prev} → {val} (nonincreasing)")
+            self._emit("monotonic", sig, {"prev": prev, "cur": val, "mode": mode}, "OK") # prev가 없거나 위반이 없으면 OK로 기록
+
+        self._prev_values[sig] = val # 정상 통과 시 이전값 갱신
+
+    # ─────────────────────────────────────────────────────────────────────
     def _emit(self, metric: str, sig: str, value: Any, status: str):
         ev = {
             "type": "dbc",
             "id": self.target_id,
-            "metric": metric,   # enum | range 
-            "signal": sig,
+            "metric": metric,
+            "signal": sig,   
             "value": value,
             "status": status,
             "ts_ms": int(time.time() * 1000),
