@@ -67,12 +67,5 @@ class Mutator:
         """선택된 바이트 내 mutation 대상 비트 인덱스 선택"""
         pass
 
-    # -----------------------------
-    # 🔹 Dispatcher
-    # -----------------------------
-    def apply_mutation(self) -> Tuple[bytes, str]:
-        """
-        가중치나 랜덤에 따라 mutation 종류를 선택하고 수행
-        결과: (mutated_data, operation_name)
-        """
-        pass
+ 
+    
