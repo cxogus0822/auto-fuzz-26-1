@@ -78,11 +78,53 @@ class Mutator:
     # -----------------------------
     def select_random_byte(self) -> int:
         """mutation 대상 바이트 인덱스 선택"""
-        pass
+        n = len(self.data)
+        if n == 0:
+            raise ValueError("빈 데이터에서는 바이트를 선택할 수 없습니다.")
 
-    def select_random_bit(self, byte_value: int) -> int:
+        p = float(self.weights.get("byte_k_p", 0.3))
+        k = 1
+        while random.random() > p and k < n:
+            k += 1
+        k = min(k, max(1, n // 3))  # 상한: 전체의 1/3
+
+        ws = [float(self.weights.get(f"byte:{i}", 1.0)) for i in range(n)] # 기본 가중치
+
+        edge = float(self.weights.get("edge_bias", 0.0))
+        if edge > 0 and n >= 2:
+            ws[0] += edge
+            ws[-1] += edge
+
+        total = sum(ws)
+        if total <= 0:
+            return random.sample(range(n), k)
+        choices = random.choices(range(n), weights=ws, k=k)
+
+        return list(sorted(set(choices))) # 중복 방지: set으로 정리
+
+    def select_random_bit(self) -> int:
         """선택된 바이트 내 mutation 대상 비트 인덱스 선택"""
-        pass
+        p = float(self.weights.get("bit_k_p", 0.4))
+        k = 1
+        while random.random() > p and k < 8:
+            k += 1
+        k = min(k, 8)
 
+        # 2️⃣ 기본 가중치
+        w = [float(self.weights.get(f"bit:{b}", 1.0)) for b in range(8)]
+
+        # 3️⃣ MSB/LSB 바이어스
+        msb = float(self.weights.get("msb_bias", 0.0))
+        lsb = float(self.weights.get("lsb_bias", 0.0))
+        if msb > 0:
+            w = [wb + msb * (b / 7.0) for b, wb in enumerate(w)]
+        if lsb > 0:
+            w = [wb + lsb * ((7 - b) / 7.0) for b, wb in enumerate(w)]
+
+        total = sum(w)
+        if total <= 0:
+            return random.sample(range(8), k)
+        choices = random.choices(range(8), weights=w, k=k)
+        return list(sorted(set(choices)))
  
     
