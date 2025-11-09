@@ -3,3 +3,4 @@ cantools
 pytest
 can-isotp
 PyYAML
+click
