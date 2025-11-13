@@ -1,202 +1,207 @@
 # src/monitor/monitor_manager.py
-# 각 모니터를 스레드로 실행하고, FAIL 발생 시 리턴값으로 종료 처리
 
 import threading
 import time
-from typing import Optional, Dict, Any
+from typing import Dict, Optional
+from monitor.timing_monitor import TimingMonitor
+from monitor.uds_monitor import UDSMonitor
+from monitor.dbc_monitor import DBCMonitor
 
 
 class MonitorManager:
-    """
-    여러 모니터(DBC, Timing, UDS)를 개별 스레드로 실행하고,
-    각 모니터로부터 실수 점수를 받아 딕셔너리로 반환합니다.
-    """
 
-    def __init__(self):
-        self.monitors: Dict[str, Any] = {}
+    
+    def __init__(self,
+                 timing_monitor: Optional[TimingMonitor] = None,
+                 uds_monitor: Optional[UDSMonitor] = None,
+                 dbc_monitor: Optional[DBCMonitor] = None):
+        """
+        :param timing_monitor: TimingMonitor 인스턴스 (None이면 비활성화)
+        :param uds_monitor: UDSMonitor 인스턴스 (None이면 비활성화)
+        :param dbc_monitor: DBCMonitor 인스턴스 (None이면 비활성화)
+        """
+        self.timing_monitor = timing_monitor
+        self.uds_monitor = uds_monitor
+        self.dbc_monitor = dbc_monitor
+        
+        # 스레드 관리
         self.threads: Dict[str, threading.Thread] = {}
-        self.durations: Dict[str, Optional[float]] = {}  # 각 모니터의 실행 시간
-        self.results: Dict[str, Optional[float]] = {}  # 각 모니터의 점수 저장
-        self.stop_event = threading.Event()
-        self.lock = threading.Lock()
-
-    def register(self, name: str, monitor_instance: Any, duration: Optional[float] = None):
-        """
-        모니터 인스턴스를 등록합니다.
         
-        :param name: 모니터 식별 이름 (예: "dbc", "timing", "uds")
-        :param monitor_instance: start() 메서드를 가진 모니터 객체
-        :param duration: 해당 모니터의 실행 시간(초). None이면 무제한
-        """
-        if name in self.monitors:
-            raise ValueError(f"Monitor '{name}' is already registered.")
+        # 스코어 저장
+        self.scores: Dict[str, float] = {
+            "timing": 0.0,
+            "uds": 0.0,
+            "dbc": 0.0
+        }
+        self.scores_lock = threading.Lock()
         
-        self.monitors[name] = monitor_instance
-        self.durations[name] = duration
-        self.results[name] = None
+        # 완료 상태 추적
+        self.completed: Dict[str, bool] = {
+            "timing": False,
+            "uds": False,
+            "dbc": False
+        }
         
-        duration_str = f"{duration}s" if duration else "unlimited"
-        print(f"[MonitorManager] Registered monitor: {name} (duration: {duration_str})")
-
-    def _monitor_wrapper(self, name: str, monitor_instance: Any, duration: Optional[float]):
-        """
-        각 모니터를 실행하는 래퍼 함수.
-        모니터의 start() 메서드로부터 실수 점수를 받아 저장합니다.
-        duration이 설정된 경우 해당 시간 후 강제 종료합니다.
-        """
-        monitor_thread = threading.current_thread()
-        timer = None
+        # 실행 상태
+        self.running = False
         
-        def timeout_handler():
-            print(f"[MonitorManager] Monitor '{name}' reached timeout ({duration}s)")
-            # 타임아웃 시 해당 모니터 스레드를 강제 종료하는 대신
-            # 결과를 None으로 설정하고 stop_event 설정
-            with self.lock:
-                if self.results[name] is None:
-                    self.results[name] = None
+    
+    def start_monitors(self, timing_timeout: Optional[float] = None):
+        """
+        각 모니터를 별도 스레드로 시작
+        
+        :param timing_timeout: Timing 모니터 실행 시간 제한(초). None이면 무제한
+        """
+        if self.running:
+            print("[WARN] Monitors are already running")
+            return
+        
+        self.running = True
+        print("[INFO] Starting monitors...")
+        
+        # 스코어 및 완료 상태 초기화
+        with self.scores_lock:
+            self.scores = {"timing": 0.0, "uds": 0.0, "dbc": 0.0}
+            self.completed = {"timing": False, "uds": False, "dbc": False}
+        
+        # Timing Monitor 스레드
+        if self.timing_monitor:
+            thread = threading.Thread(
+                target=self._run_timing_monitor,
+                args=(timing_timeout,),
+                daemon=True,
+                name="TimingMonitor"
+            )
+            self.threads["timing"] = thread
+            thread.start()
+            print("[INFO] ✓ Timing Monitor started")
+        else:
+            self.completed["timing"] = True
+        
+        # UDS Monitor 스레드
+        if self.uds_monitor:
+            thread = threading.Thread(
+                target=self._run_uds_monitor,
+                daemon=True,
+                name="UDSMonitor"
+            )
+            self.threads["uds"] = thread
+            thread.start()
+            print("[INFO] ✓ UDS Monitor started")
+        else:
+            self.completed["uds"] = True
+        
+        # DBC Monitor 스레드
+        if self.dbc_monitor:
+            thread = threading.Thread(
+                target=self._run_dbc_monitor,
+                daemon=True,
+                name="DBCMonitor"
+            )
+            self.threads["dbc"] = thread
+            thread.start()
+            print("[INFO] ✓ DBC Monitor started")
+        else:
+            self.completed["dbc"] = True
+        
+        print(f"[INFO] Total {len(self.threads)} monitor(s) running")
+    
+    
+    def _run_timing_monitor(self, timeout: Optional[float]):
         
         try:
-            # duration이 설정된 경우 타이머 시작
-            if duration is not None:
-                timer = threading.Timer(duration, timeout_handler)
-                timer.daemon = True
-                timer.start()
+            fail_score = self.timing_monitor.start(timeout=timeout)
             
-            print(f"[MonitorManager] Starting monitor: {name}")
+            with self.scores_lock:
+                self.scores["timing"] = fail_score
+                self.completed["timing"] = True
             
-            # 모니터 실행 - 실수 점수 리턴
-            score = monitor_instance.start()
-            
-            # 정상 완료 시 타이머 취소
-            if timer:
-                timer.cancel()
-            
-            with self.lock:
-                self.results[name] = float(score)
-                print(f"[MonitorManager] Monitor '{name}' returned score: {score}")
+            print(f"[INFO] Timing Monitor completed - Score: {fail_score}")
                     
         except Exception as e:
-            # 예외 발생 시 타이머 취소
-            if timer:
-                timer.cancel()
-            
-            with self.lock:
-                self.results[name] = None
-                print(f"[MonitorManager] Monitor '{name}' raised exception: {e}")
-                self.stop_event.set()
-
-    def start_all(self) -> Dict[str, Optional[float]]:
-        """
-        등록된 모든 모니터를 스레드로 시작합니다.
-        각 모니터는 register 시 설정한 duration만큼 실행됩니다.
-        
-        :return: {monitor_name: score} 딕셔너리
-        """
-        if not self.monitors:
-            print("[MonitorManager] No monitors registered.")
-            return {}
-
-        print(f"[MonitorManager] Starting {len(self.monitors)} monitor(s)...")
-        
-        # 각 모니터를 스레드로 시작
-        for name, monitor in self.monitors.items():
-            duration = self.durations[name]
-            thread = threading.Thread(
-                target=self._monitor_wrapper,
-                args=(name, monitor, duration),
-                daemon=True,
-                name=f"Monitor-{name}"
-            )
-            self.threads[name] = thread
-            thread.start()
-        
-        # 모든 스레드가 종료되거나 예외 발생까지 대기
-        while True:
-            # 예외 발생 확인
-            if self.stop_event.is_set():
-                print("[MonitorManager] Stop event detected. Terminating...")
-                break
-            
-            # 모든 스레드 완료 확인
-            all_done = all(not t.is_alive() for t in self.threads.values())
-            if all_done:
-                print("[MonitorManager] All monitors completed.")
-                break
-            
-            time.sleep(0.1)
-
-        # 스레드 종료 대기 (최대 5초)
-        for name, thread in self.threads.items():
-            if thread.is_alive():
-                print(f"[MonitorManager] Waiting for monitor '{name}' to terminate...")
-                thread.join(timeout=5.0)
-                if thread.is_alive():
-                    print(f"[MonitorManager] Warning: Monitor '{name}' did not terminate gracefully.")
-
-        # 결과 딕셔너리 반환
-        results = self.get_results()
-        print(f"[MonitorManager] Monitoring completed. Results: {results}")
-        
-        return results
-
-    def get_results(self) -> Dict[str, Optional[float]]:
-        """
-        각 모니터의 점수를 반환합니다.
-        
-        :return: {monitor_name: score} 딕셔너리
-        """
-        with self.lock:
-            return self.results.copy()
-
-    def stop_all(self):
-        """
-        모든 모니터를 강제 종료합니다.
-        """
-        print("[MonitorManager] Stopping all monitors...")
-        self.stop_event.set()
-        
-        for name, thread in self.threads.items():
-            if thread.is_alive():
-                thread.join(timeout=5.0)
-                if thread.is_alive():
-                    print(f"[MonitorManager] Warning: Monitor '{name}' did not stop.")
-
-
-# 사용 예시
-if __name__ == "__main__":
-    from dbc_monitor import DBCMonitor
-    from timing_monitor import TimingMonitor
-    from uds_monitor import UDSMonitor
-
-    manager = MonitorManager()
-
-    # 각 모니터 인스턴스 생성 및 등록
-    # DBC와 Timing은 duration 설정, UDS는 duration 없음
+            print(f"[ERROR] Timing Monitor crashed: {e}")
+            with self.scores_lock:
+                self.completed["timing"] = True
     
-    try:
-        dbc_mon = DBCMonitor()
-        manager.register("dbc", dbc_mon, duration=30.0)  # 30초 동안 실행
-    except Exception as e:
-        print(f"[WARN] DBCMonitor 초기화 실패: {e}")
-
-    try:
-        timing_mon = TimingMonitor()
-        manager.register("timing", timing_mon, duration=30.0)  # 30초 동안 실행
-    except Exception as e:
-        print(f"[WARN] TimingMonitor 초기화 실패: {e}")
-
-    try:
-        uds_mon = UDSMonitor()
-        manager.register("uds", uds_mon)  # duration 없음 (완료될 때까지 실행)
-    except Exception as e:
-        print(f"[WARN] UDSMonitor 초기화 실패: {e}")
-
-    # 모든 모니터 시작
-    scores = manager.start_all()
-
-    # 결과 확인
-    print("\n=== Monitoring Scores ===")
-    for name, score in scores.items():
-        print(f"  {name}: {score}")
     
-    # 추후 증거결합 모듈에서 이 scores 딕셔너리를 사용
+    def _run_uds_monitor(self):
+        
+        try:
+            fail_score = self.uds_monitor.start()
+            
+            with self.scores_lock:
+                self.scores["uds"] = fail_score
+                self.completed["uds"] = True
+            
+            print(f"[INFO] UDS Monitor completed - Score: {fail_score}")
+                
+        except Exception as e:
+            print(f"[ERROR] UDS Monitor crashed: {e}")
+            with self.scores_lock:
+                self.completed["uds"] = True
+    
+    
+    def _run_dbc_monitor(self):
+       
+        try:
+            fail_score = self.dbc_monitor.start()
+            
+            with self.scores_lock:
+                self.scores["dbc"] = fail_score
+                self.completed["dbc"] = True
+            
+            print(f"[INFO] DBC Monitor completed - Score: {fail_score}")
+                
+        except Exception as e:
+            print(f"[ERROR] DBC Monitor crashed: {e}")
+            with self.scores_lock:
+                self.completed["dbc"] = True
+    
+    
+    def wait_for_completion(self, timeout: Optional[float] = None):
+        """
+        모든 모니터 스레드가 종료될 때까지 대기
+        param timeout 대기 시간 제한(초). None이면 무제한
+        """
+        for name, thread in self.threads.items():
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                print(f"[WARN] {name} thread is still running")
+        
+        self.running = False
+        print("[INFO] All monitors completed")
+    
+    
+    def is_all_completed(self) -> bool:
+        """
+        모든 모니터가 완료되었는지 확인
+        """
+        with self.scores_lock:
+            return all(self.completed.values())
+    
+    
+    def get_completion_status(self) -> Dict[str, bool]:
+        """
+        각 모니터의 완료 상태 반환
+        :return: {"timing": bool, "uds": bool, "dbc": bool}
+        """
+        with self.scores_lock:
+            return self.completed.copy()
+    
+    
+    def get_scores(self) -> Dict[str, float]:
+        """
+        각 모니터별 FAIL 스코어 반환
+        :return: {"timing": float, "uds": float, "dbc": float}
+        """
+        with self.scores_lock:
+            return self.scores.copy()
+    
+    
+    def is_running(self) -> bool:
+        """
+        모니터 실행 상태 반환
+        
+        :return: 실행 중이면 True
+        """
+        return self.running
