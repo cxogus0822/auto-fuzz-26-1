@@ -11,7 +11,7 @@ from seeds.seed_manager import SeedManager
 
 CAN_CHANNEL = "can0"
 DBC_PATH    = "db/your.ecu.dbc"   
-TARGET_ID   = 0x366               
+TARGET_ID   = 0x6A6               
 Number = Union[int, float]
 
 class DBCMonitor:
@@ -95,33 +95,47 @@ class DBCMonitor:
         print(f"         DBC={self.dbc_path}, signals={list(self.rules.keys()) or '—'}")
 
         while True:
-            msg = self.bus.recv(timeout=1)
-            if not msg or msg.arbitration_id != self.target_id:
-                continue
-
-            # 디코드 실패는 즉시 예외로 올림
             try:
-                decoded = self.msg_def.decode(bytes(msg.data), decode_choices=False, scaling=True)
-            except Exception as e:
-                self._emit("decode_error", "_frame", str(e), "FAIL")
-                raise RuntimeError(f"DBC decode 실패: {e}") from e
+                msg = self.bus.recv(timeout=1)
+                if not msg or msg.arbitration_id != self.target_id:
+                    continue
+
+            # 디코드 실패
+                try:
+                    decoded = self.msg_def.decode(bytes(msg.data), decode_choices=False, scaling=True)
+                
+                except Exception as e:
+                    self._emit("decode_error", "_frame", str(e), "FAIL")
+                    continue
 
             # 신호별 검사
-            for sig, rule in self.rules.items():
-                if sig not in decoded:
-                    self._emit("missing_signal", sig, None, "FAIL")
-                    raise RuntimeError(f"신호 누락: {sig} - DBC에 정의된 신호가 디코딩 결과에 없습니다.")
+                for sig, rule in self.rules.items():
+                    try: 
+                        if sig not in decoded:
+                            self._emit("missing_signal", sig, None, "FAIL")
+                            raise RuntimeError(f"신호 누락: {sig} - DBC에 정의된 신호가 디코딩 결과에 없습니다.")
 
-                raw = decoded[sig]
+                        raw = decoded[sig]
 
-                # 타입 정규화 실패는 즉시 예외
-                try:
-                    val = self._normalize_value(raw, rule)
-                except Exception as e:
-                    self._emit("type_cast", sig, raw, "FAIL")
-                    raise ValueError(f"type cast 실패: signal={sig}, value={raw!r}") from e
+                # 타입 정규화 
+                        try:
+                            val = self._normalize_value(raw, rule)
+                        except Exception as e:
+                            self._emit("type_cast", sig, raw, "FAIL")
+                            raise ValueError(f"type cast 실패: signal={sig}, value={raw!r}") from e
 
-                self._check_rules(sig, val, rule)
+                        try:
+                            self._check_rules(sig, val, rule)
+                        except Exception as e:
+                            raise RuntimeError(f"rule 위반: signal={sig}, value={val}, err={e}"
+                        ) from e
+                    
+                    except Exception as sig_err:
+                        continue
+
+            except KeyboardInterrupt:
+                print("[ INFO ] KeyboardInterrupt: stopping monitor")
+                break
 
     # ─────────────────────────────────────────────────────────────────────
     def _normalize_value(self, raw: Any, rule: Dict[str, Any]) -> Number: # 규칙에 맞춰 값을 bool/int/float로 정규화
@@ -145,41 +159,48 @@ class DBCMonitor:
         enum_vals = rule.get("enum")
         if enum_vals is not None:
             if rule.get("kind") == "float":
-                ok = any(float(val) == float(a) for a in enum_vals)
+                enum_ok = any(float(val) == float(a) for a in enum_vals)
             else:
-                ok = val in set(int(a) for a in enum_vals)
+                enum_ok = val in set(int(a) for a in enum_vals)
 
-            self._emit("enum", sig, val, "OK" if ok else "FAIL")
-            if not ok:
+            self._emit("enum", sig, val, "OK" if enum_ok else "FAIL")
+
+            if not enum_ok:
                 raise RuntimeError(f"enum 위반: {sig} value={val}, 허용={enum_vals}")
 
         # range 검사
         mn, mx = rule.get("min"), rule.get("max")
+        range_ok = True
 
         if mn is not None and float(val) < float(mn):
-            self._emit("range", sig, val, "FAIL")
-            raise RuntimeError(f"range 하한 위반: {sig} value={val}, min={mn}")
-
+            range_ok = False
         if mx is not None and float(val) > float(mx):
-            self._emit("range", sig, val, "FAIL")
-            raise RuntimeError(f"range 상한 위반: {sig} value={val}, max={mx}")
+            range_ok = False
 
-        self._emit("range", sig, val, "OK")
+        self._emit("range", sig, val, "OK" if range_ok else "FAIL")
+
+        if not range_ok:
+            raise RuntimeError(f"range 위반: {sig} value={val}, min={mn}, max={mx}")
 
         # 단조성 검사
         mode = rule.get("monotonic")
         if mode:
             prev = self._prev_values.get(sig)
+            mono_ok = True
+            
             if prev is not None:
                 pv = float(prev)
                 cv = float(val)
+
                 if mode == "nondecreasing" and cv < pv:
-                    self._emit("monotonic", sig, {"prev": prev, "cur": val, "mode": mode}, "FAIL")
-                    raise RuntimeError(f"단조성 위반: {sig} {prev} → {val} (nondecreasing)")
+                    mono_ok = False
                 if mode == "nonincreasing" and cv > pv:
-                    self._emit("monotonic", sig, {"prev": prev, "cur": val, "mode": mode}, "FAIL")
-                    raise RuntimeError(f"단조성 위반: {sig} {prev} → {val} (nonincreasing)")
-            self._emit("monotonic", sig, {"prev": prev, "cur": val, "mode": mode}, "OK") # prev가 없거나 위반이 없으면 OK로 기록
+                    mono_ok = False
+
+            self._emit("monotonic", sig, {"prev": prev, "cur": val, "mode": mode}, "OK" if mono_ok else "FAIL")
+
+            if not mono_ok:
+                raise RuntimeError(f"단조성 위반: {sig} {prev} → {val} ({mode})")
 
         self._prev_values[sig] = val # 정상 통과 시 이전값 갱신
 
