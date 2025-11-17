@@ -93,61 +93,78 @@ class DBCMonitor:
         self._total_checks = 0  # 전체 검사 횟수
 
     # ─────────────────────────────────────────────────────────────────────
-    def start(self) -> float:
-        """
-        DBC 모니터링 시작
-        예외 발생 시 즉시 종료하고 FAIL 스코어 반환
-        
-        :return: 최종 FAIL 스코어 (0.0 ~ 1.0)
-        """
-        print(f"[ INFO ] DBCMonitor: 0x{self.target_id:X} on {self.channel}")
-        print(f"         DBC={self.dbc_path}, signals={list(self.rules.keys()) or '—'}")
+    def start(self, timeout: Optional[float] = None) -> float:
+    """
+    DBC 모니터링 시작
+    예외 발생 시 즉시 종료하고 FAIL 스코어 반환
+    timeout이 설정되면 해당 시간(초) 동안만 실행 후 정상 종료
 
-        self._fail_score = 0.0
-        self._fail_count = 0
-        self._total_checks = 0
+    :param timeout: 최대 실행 시간(초). None이면 무제한 실행
+    :return: 최종 FAIL 스코어 (0.0 ~ 1.0)
+    """
+    print(f"[ INFO ] DBCMonitor: 0x{self.target_id:X} on {self.channel}")
+    print(f"         DBC={self.dbc_path}, signals={list(self.rules.keys()) or '—'}")
 
-        try:
-            while True:
-                msg = self.bus.recv(timeout=1)
-                if not msg or msg.arbitration_id != self.target_id:
-                    continue
+    self._fail_score = 0.0
+    self._fail_count = 0
+    self._total_checks = 0
 
-                # 디코드 실패는 즉시 예외로 올림
+    start_time = time.time()
+
+    try:
+        while True:
+
+            # ───── timeout 검사 ─────
+            if timeout is not None:
+                if (time.time() - start_time) >= timeout:
+                    print(f"[INFO] DBC Monitor timeout reached ({timeout}s)")
+                    break
+
+            msg = self.bus.recv(timeout=1)
+            if not msg or msg.arbitration_id != self.target_id:
+                continue
+
+            # 디코드 시도
+            try:
+                decoded = self.msg_def.decode(
+                    bytes(msg.data),
+                    decode_choices=False,
+                    scaling=True
+                )
+            except Exception as e:
+                self._emit("decode_error", "_frame", str(e), "FAIL")
+                self._fail_score = 1.0
+                raise RuntimeError(f"DBC decode 실패: {e}") from e
+
+            # 신호 규칙 검사
+            for sig, rule in self.rules.items():
+                if sig not in decoded:
+                    self._emit("missing_signal", sig, None, "FAIL")
+                    self._fail_score = 1.0
+                    raise RuntimeError(f"신호 누락: {sig}")
+
+                raw = decoded[sig]
+
                 try:
-                    decoded = self.msg_def.decode(bytes(msg.data), decode_choices=False, scaling=True)
+                    val = self._normalize_value(raw, rule)
                 except Exception as e:
-                    self._emit("decode_error", "_frame", str(e), "FAIL")
-                    self._fail_score = 1.0  # 디코드 실패는 치명적 오류
-                    raise RuntimeError(f"DBC decode 실패: {e}") from e
+                    self._emit("type_cast", sig, raw, "FAIL")
+                    self._fail_score = 1.0
+                    raise ValueError(
+                        f"type cast 실패: signal={sig}, value={raw!r}"
+                    ) from e
 
-                # 신호별 검사
-                for sig, rule in self.rules.items():
-                    if sig not in decoded:
-                        self._emit("missing_signal", sig, None, "FAIL")
-                        self._fail_score = 1.0  # 신호 누락은 치명적 오류
-                        raise RuntimeError(f"신호 누락: {sig} - DBC에 정의된 신호가 디코딩 결과에 없습니다.")
+                self._check_rules(sig, val, rule)
 
-                    raw = decoded[sig]
-
-                    # 타입 정규화 실패는 즉시 예외
-                    try:
-                        val = self._normalize_value(raw, rule)
-                    except Exception as e:
-                        self._emit("type_cast", sig, raw, "FAIL")
-                        self._fail_score = 1.0  # 타입 캐스트 실패는 치명적 오류
-                        raise ValueError(f"type cast 실패: signal={sig}, value={raw!r}") from e
-
-                    self._check_rules(sig, val, rule)
-
-        except (RuntimeError, ValueError) as e:
-            # 예외 발생 시 현재 스코어 반환
-            print(f"[INFO] DBC Monitor stopped due to error: {e}")
-            print(f"[INFO] DBC Monitor finished - FAIL score: {self._fail_score:.3f}")
-            return self._fail_score
-        
-        # 정상 종료 (실제로는 무한루프이므로 도달하지 않음)
+    except (RuntimeError, ValueError) as e:
+        # 예외 발생 → FAIL 스코어 반환
+        print(f"[INFO] DBC Monitor stopped due to error: {e}")
+        print(f"[INFO] DBC Monitor finished - FAIL score: {self._fail_score:.3f}")
         return self._fail_score
+
+    # timeout 혹은 정상 종료
+    print(f"[INFO] DBC Monitor finished - FAIL score: {self._fail_score:.3f}")
+    return self._fail_score
 
     # ─────────────────────────────────────────────────────────────────────
     def _normalize_value(self, raw: Any, rule: Dict[str, Any]) -> Number: # 규칙에 맞춰 값을 bool/int/float로 정규화

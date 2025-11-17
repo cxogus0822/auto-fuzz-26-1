@@ -46,65 +46,69 @@ class MonitorManager:
         self.running = False
         
     
-    def start_monitors(self, timing_timeout: Optional[float] = None):
-        """
-        각 모니터를 별도 스레드로 시작
-        
-        :param timing_timeout: Timing 모니터 실행 시간 제한(초). None이면 무제한
-        """
-        if self.running:
-            print("[WARN] Monitors are already running")
-            return
-        
-        self.running = True
-        print("[INFO] Starting monitors...")
-        
-        # 스코어 및 완료 상태 초기화
-        with self.scores_lock:
-            self.scores = {"timing": 0.0, "uds": 0.0, "dbc": 0.0}
-            self.completed = {"timing": False, "uds": False, "dbc": False}
-        
-        # Timing Monitor 스레드
-        if self.timing_monitor:
-            thread = threading.Thread(
-                target=self._run_timing_monitor,
-                args=(timing_timeout,),
-                daemon=True,
-                name="TimingMonitor"
-            )
-            self.threads["timing"] = thread
-            thread.start()
-            print("[INFO] ✓ Timing Monitor started")
-        else:
-            self.completed["timing"] = True
-        
-        # UDS Monitor 스레드
-        if self.uds_monitor:
-            thread = threading.Thread(
-                target=self._run_uds_monitor,
-                daemon=True,
-                name="UDSMonitor"
-            )
-            self.threads["uds"] = thread
-            thread.start()
-            print("[INFO] ✓ UDS Monitor started")
-        else:
-            self.completed["uds"] = True
-        
-        # DBC Monitor 스레드
-        if self.dbc_monitor:
-            thread = threading.Thread(
-                target=self._run_dbc_monitor,
-                daemon=True,
-                name="DBCMonitor"
-            )
-            self.threads["dbc"] = thread
-            thread.start()
-            print("[INFO] ✓ DBC Monitor started")
-        else:
-            self.completed["dbc"] = True
-        
-        print(f"[INFO] Total {len(self.threads)} monitor(s) running")
+    def start_monitors(self, 
+                   timing_timeout: Optional[float] = 5.0,
+                   dbc_timeout: Optional[float] = 5.0):
+    """
+    각 모니터를 별도 스레드로 시작
+
+    :param timing_timeout: Timing 모니터 실행 시간 제한(초). 기본 5초
+    :param dbc_timeout: DBC 모니터 실행 시간 제한(초). 기본 5초
+    """
+    if self.running:
+        print("[WARN] Monitors are already running")
+        return
+    
+    self.running = True
+    print("[INFO] Starting monitors...")
+    
+    # 스코어 및 완료 상태 초기화
+    with self.scores_lock:
+        self.scores = {"timing": 0.0, "uds": 0.0, "dbc": 0.0}
+        self.completed = {"timing": False, "uds": False, "dbc": False}
+    
+    # Timing Monitor 스레드
+    if self.timing_monitor:
+        thread = threading.Thread(
+            target=self._run_timing_monitor,
+            args=(timing_timeout,),
+            daemon=True,
+            name="TimingMonitor"
+        )
+        self.threads["timing"] = thread
+        thread.start()
+        print("[INFO] ✓ Timing Monitor started")
+    else:
+        self.completed["timing"] = True
+
+    # UDS Monitor 스레드
+    if self.uds_monitor:
+        thread = threading.Thread(
+            target=self._run_uds_monitor,
+            daemon=True,
+            name="UDSMonitor"
+        )
+        self.threads["uds"] = thread
+        thread.start()
+        print("[INFO] ✓ UDS Monitor started")
+    else:
+        self.completed["uds"] = True
+
+    # DBC Monitor 스레드 (timeout 추가됨)
+    if self.dbc_monitor:
+        thread = threading.Thread(
+            target=self._run_dbc_monitor,
+            args=(dbc_timeout,),
+            daemon=True,
+            name="DBCMonitor"
+        )
+        self.threads["dbc"] = thread
+        thread.start()
+        print("[INFO] ✓ DBC Monitor started")
+    else:
+        self.completed["dbc"] = True
+
+    print(f"[INFO] Total {len(self.threads)} monitor(s) running")
     
     
     def _run_timing_monitor(self, timeout: Optional[float]):
@@ -141,21 +145,20 @@ class MonitorManager:
                 self.completed["uds"] = True
     
     
-    def _run_dbc_monitor(self):
-       
-        try:
-            fail_score = self.dbc_monitor.start()
-            
-            with self.scores_lock:
-                self.scores["dbc"] = fail_score
-                self.completed["dbc"] = True
-            
-            print(f"[INFO] DBC Monitor completed - Score: {fail_score}")
+    def _run_dbc_monitor(self, timeout: Optional[float]):
+    try:
+        fail_score = self.dbc_monitor.start(timeout=timeout)
+
+        with self.scores_lock:
+            self.scores["dbc"] = fail_score
+            self.completed["dbc"] = True
+
+        print(f"[INFO] DBC Monitor completed - Score: {fail_score}")
                 
-        except Exception as e:
-            print(f"[ERROR] DBC Monitor crashed: {e}")
-            with self.scores_lock:
-                self.completed["dbc"] = True
+    except Exception as e:
+        print(f"[ERROR] DBC Monitor crashed: {e}")
+        with self.scores_lock:
+            self.completed["dbc"] = True
     
     
     def wait_for_completion(self, timeout: Optional[float] = None):
