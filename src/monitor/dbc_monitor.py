@@ -209,7 +209,6 @@ class DBCMonitor:
 
         # range 검사
         mn, mx = rule.get("min"), rule.get("max")
-        range_ok = True
 
         if mn is not None:
             self._total_checks += 1
@@ -234,7 +233,6 @@ class DBCMonitor:
         mode = rule.get("monotonic")
         if mode:
             prev = self._prev_values.get(sig)
-            mono_ok = True
             
             if prev is not None:
                 self._total_checks += 1
