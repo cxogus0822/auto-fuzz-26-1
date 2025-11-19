@@ -263,7 +263,7 @@ class DBCMonitor:
 
     def _update_fail_score(self):
         if self._total_checks > 0:
-            self._fail_score = min(self._fail_count / self._total_checks, 1.0)
+            self._fail_score = 1.0 if self._fail_count > 0 else 0.0
 
     def _emit(self, metric: str, sig: str, value: Any, status: str):
         ev = {
