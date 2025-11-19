@@ -10,7 +10,7 @@ from logger.base_logger import log_event
 # 모니터링 설정값
 
 CAN_CHANNEL = "can0"
-TARGET_UDS_ID = 0x366
+TARGET_UDS_ID = 0x6A6
 UDS_RESPONSE_OFFSET = 0x6A
 PADDING_BYTE = 0xAA
 
@@ -92,7 +92,12 @@ class UDSMonitor:
         while time.time() - start < timeout:
             self.stack.process()
             if self.stack.available():
-                return list(self.stack.recv())
+                resp = list(self.stack.recv())
+                 # ➜ 0x7F 0x78(Response Pending) → 아직 최종 응답이 아님, 타임아웃 안에서 재시도
+                if len(resp) >= 3 and resp[0] == 0x7F and resp[2] == 0x78:
+                    log_event("uds", TARGET_UDS_ID, "NRC_0x78_pending", "wait_more", "INFO")
+                    continue  # 최종 응답 올 때까지 루프 계속
+                return resp
             time.sleep(0.01)
         return None
 
