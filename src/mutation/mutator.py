@@ -2,6 +2,18 @@ import random
 from typing import Dict
 from logger.base_logger import log_event   # [추가] 예외 로깅용
 
+# 가중치 정의
+DEFAULT_BYTE_K_PROB   = 0.3  # 바이트 선택 확률 임계값
+DEFAULT_BYTE_WEIGHT = 1.0  # 개별 바이트 기본 가중치
+DEFAULT_EDGE_BIAS     = 0.0  # 양 끝 편향값
+
+DEFAULT_BIT_K_PROB    = 0.4  # 비트 선택 확률 임계값
+DEFAULT_BIT_WEIGHT  = 1.0  # 개별 비트 기본 가중치
+DEFAULT_MSB_BIAS      = 0.0  # 최상위 비트 가중치 편향
+DEFAULT_LSB_BIAS      = 0.0  # 최하위 비트 가중치 편향
+
+DEFAULT_BUDGET        = 256
+DEFAULT_MAX_OPS       = 3
 
 class Mutator:
     def __init__(self, data: bytes, weights: Dict[str, float], min_length: int = 1):  # [추가] min_length
@@ -15,8 +27,8 @@ class Mutator:
         self.min_length = min_length  # [추가] 최소 길이 제한
 
     def mutate_manager(self) -> list[bytes]:
-        budget        = int(self.weights.get("manager.budget", 256))
-        max_ops       = int(self.weights.get("manager.max_ops", 3))
+        budget        = int(self.weights.get("manager.budget", DEFAULT_BUDGET))
+        max_ops       = int(self.weights.get("manager.max_ops", DEFAULT_MAX_OPS))
         enable_struct = bool(self.weights.get("manager.structural", True))
         include_orig  = bool(self.weights.get("manager.include_original", False))
         
@@ -223,14 +235,14 @@ class Mutator:
         if n == 0:
             raise ValueError("빈 데이터에서는 바이트를 선택할 수 없습니다.")
 
-        p = float(self.weights.get("byte_k_p", 0.3))
+        p = float(self.weights.get("byte_k_p", DEFAULT_BYTE_K_PROB))
         k = 1
         while random.random() > p and k < n:
             k += 1
         k = min(k, max(1, n // 3))
 
-        ws = [float(self.weights.get(f"byte:{i}", 1.0)) for i in range(n)]
-        edge = float(self.weights.get("edge_bias", 0.0))
+        ws = [float(self.weights.get(f"byte:{i}", DEFAULT_BYTE_WEIGHT)) for i in range(n)]
+        edge = float(self.weights.get("edge_bias", DEFAULT_EDGE_BIAS))
         if edge > 0 and n >= 2:
             ws[0] += edge
             ws[-1] += edge
@@ -242,15 +254,15 @@ class Mutator:
         return list(sorted(set(choices)))
 
     def select_random_bit(self) -> list[int]:
-        p = float(self.weights.get("bit_k_p", 0.4))
+        p = float(self.weights.get("bit_k_p", DEFAULT_BIT_K_PROB))
         k = 1
         while random.random() > p and k < 8:
             k += 1
         k = min(k, 8)
 
-        w = [float(self.weights.get(f"bit:{b}", 1.0)) for b in range(8)]
-        msb = float(self.weights.get("msb_bias", 0.0))
-        lsb = float(self.weights.get("lsb_bias", 0.0))
+        w = [float(self.weights.get(f"bit:{b}", DEFAULT_BIT_WEIGHT)) for b in range(8)]
+        msb = float(self.weights.get("msb_bias", DEFAULT_MSB_BIAS))
+        lsb = float(self.weights.get("lsb_bias", DEFAULT_LSB_BIAS))
         if msb > 0:
             w = [wb + msb * (b / 7.0) for b, wb in enumerate(w)]
         if lsb > 0:
