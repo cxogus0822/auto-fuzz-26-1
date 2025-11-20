@@ -10,8 +10,8 @@ from seeds.seed_manager import SeedManager
 
 
 CAN_CHANNEL = "can0"
-DBC_PATH    = "db/your.ecu.dbc"
-TARGET_ID   = 0x366
+DBC_PATH    = "db/your.ecu.dbc"   
+TARGET_ID   = 0x6A6               
 Number = Union[int, float]
 
 
@@ -197,12 +197,12 @@ class DBCMonitor:
         if enum_vals is not None:
             self._total_checks += 1
             if rule.get("kind") == "float":
-                ok = any(float(val) == float(a) for a in enum_vals)
+                enum_ok = any(float(val) == float(a) for a in enum_vals)
             else:
-                ok = val in set(int(a) for a in enum_vals)
+                enum_ok = val in set(int(a) for a in enum_vals)
 
-            self._emit("enum", sig, val, "OK" if ok else "FAIL")
-            if not ok:
+            self._emit("enum", sig, val, "OK" if enum_ok else "FAIL")
+            if not enum_ok:
                 self._fail_count += 1
                 self._update_fail_score()
                 raise RuntimeError(f"enum 위반: {sig} value={val}, 허용={enum_vals}")
@@ -233,6 +233,7 @@ class DBCMonitor:
         mode = rule.get("monotonic")
         if mode:
             prev = self._prev_values.get(sig)
+            
             if prev is not None:
                 self._total_checks += 1
                 pv = float(prev)
@@ -260,7 +261,7 @@ class DBCMonitor:
 
     def _update_fail_score(self):
         if self._total_checks > 0:
-            self._fail_score = min(self._fail_count / self._total_checks, 1.0)
+            self._fail_score = 1.0 if self._fail_count > 0 else 0.0
 
     def _emit(self, metric: str, sig: str, value: Any, status: str):
         ev = {
