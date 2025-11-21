@@ -5,8 +5,8 @@ import time
 import can
 import cantools
 from typing import Dict, Any, Optional, List, Union
-from logger.base_logger import log_event
-from seeds.seed_manager import SeedManager
+from ..logger.base_logger import log_event
+from ..seeds.seed_manager import SeedManager
 
 
 CAN_CHANNEL = "can0"
