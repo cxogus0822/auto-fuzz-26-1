@@ -1,7 +1,7 @@
 # src/seeds/seed_queue.py
 import heapq
 from typing import List, Optional
-from .seed_manager import Seed, SeedManager
+from ..seeds.seed_manager import Seed, SeedManager
 
 
 class SeedQueue:

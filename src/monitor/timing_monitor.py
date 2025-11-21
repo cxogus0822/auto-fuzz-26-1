@@ -2,7 +2,7 @@
 
 import can
 import time
-from logger.base_logger import log_event
+from ..logger.base_logger import log_event
 from typing import Optional
 
 

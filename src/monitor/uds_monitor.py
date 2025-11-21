@@ -4,7 +4,7 @@ import os
 import can
 import isotp
 import yaml
-from logger.base_logger import log_event
+from ..logger.base_logger import log_event
 
 
 # 모니터링 설정값
