@@ -1,7 +1,8 @@
 # src/cli.py
+
 import json
 import click
-from pipeline import AutoFuzzPipeline
+from .pipeline import AutoFuzzPipeline
 
 
 @click.group()
@@ -31,33 +32,39 @@ def list(db):
     click.echo(f"[+] {len(seeds)} seeds loaded:")
     click.echo("-" * 60)
     for s in seeds:
-        click.echo(f"[{s.id:03}] {s.signal_name:<25} | msg_id={hex(s.message_id)} | priority={s.priority}")
+        click.echo(
+            f"[{s.id:03}] {s.signal_name:<25} "
+            f"| msg_id={hex(s.message_id)} | priority={s.priority}"
+        )
     click.echo("-" * 60)
 
 
-# Monitor 결과 출력
+# 모니터 결과 UI
 def print_monitor_results(results: dict):
     click.echo(click.style("\n=== AutoFuzz Monitor Results ===\n", fg="cyan", bold=True))
 
     for name, v in results.items():
         monitor = name.upper()
+        score_val = v.get("score", 0.0)
+        status = v.get("status", "unknown")
 
-        # 상태 색상 + 아이콘
-        if v["completed"]:
-            status_icon = click.style("✓", fg="green")
-            status_text = click.style("completed", fg="green")
+        # 상태 텍스트 색상 처리
+        if status == "ok":
+            status_text = click.style("OK", fg="green")
+        elif status == "timeout":
+            status_text = click.style("TIMEOUT", fg="yellow")
+        elif status == "crashed":
+            status_text = click.style("CRASHED", fg="red")
+        elif status == "skipped":
+            status_text = click.style("SKIPPED", fg="blue")
         else:
-            status_icon = click.style("✗", fg="red")
-            status_text = click.style("timeout", fg="red")
+            status_text = click.style("UNKNOWN", fg="white")
 
         # 점수 색상
-        score = click.style(f"{v['score']:.3f}", fg="cyan")
+        score_text = click.style(f"{score_val:.3f}", fg="cyan")
 
-        click.echo(
-            f"{status_icon} {click.style(monitor, bold=True):<10} "
-            f"Score: {score}  ({status_text})"
-        )
-        
+        click.echo(f"{monitor:<10} | Score: {score_text} | Status: {status_text}")
+
     click.echo()
 
 
@@ -79,7 +86,7 @@ def run(db, channel, can, can_id, save_json):
         click.echo("[!] Invalid CAN ID format.")
         return
 
-    # 인터페이스 준비
+    # CAN 인터페이스 준비
     can_iface = None
     if can:
         from interface.can_interface import CANInterface

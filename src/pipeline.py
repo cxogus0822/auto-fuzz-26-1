@@ -1,16 +1,19 @@
 # src/pipeline.py
+
 import time
 import json
 from typing import Optional, Dict, Any
 
-from seeds.dbc_parser import DbcParser
-from seeds.seed_manager import SeedManager, Seed
-from seeds.seed_queue import SeedQueue
+from .seeds.dbc_parser import DbcParser
+from .seeds.seed_manager import SeedManager, Seed
+from .seeds.seed_queue import SeedQueue
 
-from monitor.monitor_manager import MonitorManager
-from monitor.timing_monitor import TimingMonitor
-from monitor.uds_monitor import UDSMonitor
-from monitor.dbc_monitor import DBCMonitor
+from .monitor.monitor_manager import MonitorManager
+from .monitor.timing_monitor import TimingMonitor
+from .monitor.uds_monitor import UDSMonitor
+from .monitor.dbc_monitor import DBCMonitor
+
+from .mutation.mutator import Mutator
 
 
 class AutoFuzzPipeline:
@@ -39,6 +42,7 @@ class AutoFuzzPipeline:
         manager.close()
         return seeds
 
+
     def __init__(self, db_path: str = "seeds.db", can_iface: Optional[object] = None):
         self.queue = SeedQueue(db_path)
         self.can = can_iface
@@ -50,66 +54,105 @@ class AutoFuzzPipeline:
             dbc_monitor=DBCMonitor()
         )
 
-    def send(self, seed: Seed):
+
+    def send_raw_payload(self, data: bytes, arb_id: int):
+        """실제 CAN raw 송신 또는 스텁 출력"""
         if not self.can:
-            arb = seed.message_id or 0x6A6
-            print(f"[Stub:Tx] ID={hex(arb)} | Signal={seed.signal_name:<25}")
+            print(f"[Stub:Tx] ID={hex(arb_id)} | Data={data.hex()}")
             return
 
         try:
-            value = int(seed.metadata.offset or 0)
-        except Exception:
-            value = 0
-
-        data = value.to_bytes(8, "little", signed=True)
-        arb = getattr(seed, "message_id", None) or getattr(self.can, "can_id", 0x6A6)
-
-        try:
-            self.can.send_raw(data, arb_id=arb)
+            self.can.send_raw(data, arb_id=arb_id)
         except Exception as e:
             print(f"[!] CAN send error: {e}")
 
+
+    def fuzz_seed(self, seed: Seed, monitor_weights: Dict[str, float]):
+        """
+        1. seed → base bytes 생성
+        2. Mutator 생성 & mutate_manager 실행
+        3. Mutated payload 각각 CAN 송신
+        """
+        try:
+            value = int(seed.metadata.offset or 0)
+            base_data = value.to_bytes(8, "little", signed=True)
+        except Exception:
+            base_data = (0).to_bytes(8, "little")
+
+        mut = Mutator(
+            data=base_data,
+            weights=monitor_weights,
+            min_length=1
+        )
+
+        mutated_list = mut.mutate_manager()
+
+        arb_id = seed.message_id or 0x6A6
+
+        for payload in mutated_list:
+            self.send_raw_payload(payload, arb_id)
+            time.sleep(0.01)
+
+
     def run(self) -> Dict[str, Any]:
         """
-        퍼징 + 모니터링을 수행하고 최종 결과 딕셔너리로 반환한다.
-        CLI 쪽에서 출력/저장하도록 함.
+        1. 모니터 시작
+        2. Seed pop
+        3. Mutator → Tx
+        4. 모니터 종료 + 결과 반환
         """
         self.running = True
 
-        # 모니터 실행
-        self.monitor_manager.start_monitors(timing_timeout=5.0)
+        # 모니터 시작
+        self.monitor_manager.start_monitors(
+            timing_timeout=5.0,
+            dbc_timeout=5.0
+        )
 
-        # CAN Listener 시작
+        # CAN listener
         if self.can:
             try:
                 self.can.start_listener()
             except Exception as e:
                 print(f"[!] CAN listener start failed: {e}")
 
-        # Fuzzing Loop
+        # mutator 초기 가중치
+        monitor_weights = {}
+
+        # fuzzing
         while self.running:
             seed = self.queue.pop()
             if not seed:
                 break
 
-            self.send(seed)
+            self.fuzz_seed(seed, monitor_weights)
             time.sleep(0.2)
 
-        # 종료 처리
         if self.can:
             self.can.stop_listener()
 
         self.monitor_manager.wait_for_completion()
 
         scores = self.monitor_manager.get_scores()
-        status = self.monitor_manager.get_completion_status()
+        completed = self.monitor_manager.get_completion_status()
+        status = self.monitor_manager.get_status()      # 상세 상태 추가
 
-        # 파이프라인 종료
         self.queue.close()
 
-        # 결과 딕셔너리 리턴
         return {
-            "timing": {"score": scores["timing"], "completed": status["timing"]},
-            "uds": {"score": scores["uds"], "completed": status["uds"]},
-            "dbc": {"score": scores["dbc"], "completed": status["dbc"]},
+            "timing": {
+                "score": scores["timing"],
+                "completed": completed["timing"],
+                "status": status["timing"],
+            },
+            "uds": {
+                "score": scores["uds"],
+                "completed": completed["uds"],
+                "status": status["uds"],
+            },
+            "dbc": {
+                "score": scores["dbc"],
+                "completed": completed["dbc"],
+                "status": status["dbc"],
+            },
         }
