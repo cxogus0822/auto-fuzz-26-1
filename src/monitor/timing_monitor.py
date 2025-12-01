@@ -8,7 +8,7 @@ from typing import Optional
 
 # 모니터링 설정값 
 CAN_CHANNEL = "can0"           # 사용할 CAN 인터페이스 
-TARGET_ID = 0x366              # Blinkmodi_02
+TARGET_ID = 0x6A6
 EXPECTED_CYCLE_MS = 1000       # 기대 주기 
 TOLERANCE_MS = 50              # 허용 오차
 LOG_INTERVAL = 10              # 평균 주기 출력 주기 (10프레임마다 평균 계산)
