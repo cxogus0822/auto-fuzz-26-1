@@ -10,7 +10,7 @@ from ..seeds.seed_manager import SeedManager
 
 
 CAN_CHANNEL = "can0"
-DBC_PATH    = "db/your.ecu.dbc"   
+DBC_PATH    = "A5.dbc"   
 TARGET_ID   = 0x6A6               
 Number = Union[int, float]
 
