@@ -3,7 +3,7 @@
 import json
 import click
 from .pipeline import AutoFuzzPipeline
-from ..config.loader import load_config
+from config.loader import load_config
 
 
 @click.group()
