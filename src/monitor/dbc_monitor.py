@@ -1,5 +1,4 @@
 # src/monitor/dbc_monitor.py
-# DBC 기반 신호 모니터 (1-bit + multi-bit, monotonic, raise on errors)
 
 import time
 import can
@@ -8,10 +7,6 @@ from typing import Dict, Any, Optional, List, Union
 from ..logger.base_logger import log_event
 from ..seeds.seed_manager import SeedManager
 
-
-CAN_CHANNEL = "can0"
-DBC_PATH    = "A5.dbc"   
-TARGET_ID   = 0x6A6               
 Number = Union[int, float]
 
 
@@ -66,11 +61,11 @@ class DBCMonitor:
 
     def __init__(
         self,
-        channel: str = CAN_CHANNEL,
-        dbc_path: str = DBC_PATH,
-        target_id: int = TARGET_ID,
+        channel: str,
+        dbc_path: str,
+        target_id: int,
+        seed_db_path: str,
         rules: Optional[Dict[str, Dict[str, Any]]] = None,
-        seed_db_path: str = "db/seeds.sqlite"
     ):
         self.channel = channel
         self.dbc_path = dbc_path
@@ -81,6 +76,7 @@ class DBCMonitor:
         self.bus = can.interface.Bus(channel=self.channel, bustype="socketcan")
         self.db  = cantools.database.load_file(self.dbc_path)
         self.msg_def = self.db.get_message_by_frame_id(self.target_id)
+
         if self.msg_def is None:
             raise ValueError(f"DBC에 ID 0x{self.target_id:X} 메시지 정의가 없습니다.")
 
@@ -102,14 +98,6 @@ class DBCMonitor:
 
 
     def start(self, timeout: Optional[float] = None) -> float:
-        """
-        DBC 모니터링 시작
-        예외 발생 시 즉시 종료하고 FAIL 스코어 반환
-        timeout이 설정되면 해당 시간 동안만 실행 후 종료
-
-        :param timeout: 최대 실행 시간(초). None이면 무제한
-        :return: 최종 FAIL 스코어 (0.0 ~ 1.0)
-        """
 
         print(f"[ INFO ] DBCMonitor: 0x{self.target_id:X} on {self.channel}")
         print(f"         DBC={self.dbc_path}, signals={list(self.rules.keys()) or '—'}")
@@ -123,7 +111,6 @@ class DBCMonitor:
         try:
             while True:
 
-                # Timeout 체크
                 if timeout is not None:
                     if (time.time() - start_time) >= timeout:
                         print(f"[INFO] DBC Monitor timeout reached ({timeout}s)")
@@ -133,7 +120,6 @@ class DBCMonitor:
                 if not msg or msg.arbitration_id != self.target_id:
                     continue
 
-                # 디코드
                 try:
                     decoded = self.msg_def.decode(
                         bytes(msg.data),
@@ -145,7 +131,6 @@ class DBCMonitor:
                     self._fail_score = 1.0
                     raise RuntimeError(f"DBC decode 실패: {e}") from e
 
-                # 규칙 검사
                 for sig, rule in self.rules.items():
                     if sig not in decoded:
                         self._emit("missing_signal", sig, None, "FAIL")
@@ -192,7 +177,6 @@ class DBCMonitor:
 
 
     def _check_rules(self, sig: str, val: Number, rule: Dict[str, Any]):
-        # enum 검사
         enum_vals = rule.get("enum")
         if enum_vals is not None:
             self._total_checks += 1
@@ -207,7 +191,6 @@ class DBCMonitor:
                 self._update_fail_score()
                 raise RuntimeError(f"enum 위반: {sig} value={val}, 허용={enum_vals}")
 
-        # range 검사
         mn, mx = rule.get("min"), rule.get("max")
 
         if mn is not None:
@@ -229,11 +212,10 @@ class DBCMonitor:
         if mn is not None or mx is not None:
             self._emit("range", sig, val, "OK")
 
-        # 단조성 검사
         mode = rule.get("monotonic")
         if mode:
             prev = self._prev_values.get(sig)
-            
+
             if prev is not None:
                 self._total_checks += 1
                 pv = float(prev)
