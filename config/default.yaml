@@ -1,0 +1,12 @@
+paths:
+  dbc: "A5.dbc"
+  seed_db: "seeds.db"
+  logs: "logs/"
+
+can:
+  channel: "vcan0"
+  default_id: "0x6A6"
+
+fuzz:
+  timing_timeout: 5.0
+  dbc_timeout: 5.0
