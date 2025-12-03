@@ -4,8 +4,10 @@ paths:
   logs: "logs/"
 
 can:
-  channel: "vcan0"
+  enable: true
+  channel: "can0"      
   default_id: "0x6A6"
+  force_default_id: true
 
 fuzz:
   timing_timeout: 5.0
