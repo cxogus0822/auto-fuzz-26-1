@@ -109,7 +109,10 @@ class AutoFuzzPipeline:
 
         mutated_list = mut.mutate_manager()
 
-        arb_id = seed.message_id or int(self.cfg["can"]["default_id"], 16)
+        if self.cfg["can"].get("force_default_id", False):
+            arb_id = int(self.cfg["can"]["default_id"], 16)
+        else:
+            arb_id = seed.message_id or int(self.cfg["can"]["default_id"], 16)
 
         for payload in mutated_list:
             self.send_raw_payload(payload, arb_id)
