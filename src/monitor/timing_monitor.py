@@ -9,9 +9,10 @@ from typing import Optional
 # 모니터링 설정값 
 CAN_CHANNEL = "can0"           # 사용할 CAN 인터페이스 
 TARGET_ID = 0x6A6
-EXPECTED_CYCLE_MS = 1000       # 기대 주기 
+EXPECTED_CYCLE_MS = 500        # 기대 주기 
 TOLERANCE_MS = 50              # 허용 오차
 LOG_INTERVAL = 10              # 평균 주기 출력 주기 (10프레임마다 평균 계산)
+MAX_TIMEOUT = 5.0              # 최대 timeout (초)
 
 
 class TimingMonitor:
@@ -40,6 +41,7 @@ class TimingMonitor:
         self._frame_counter = 0   # 평균 주기 계산용 카운터
         self._cycle_list = []     # 최근 N개의 주기 기록
         self._fail_score = 0.0    # FAIL 스코어 누적
+        self._total_frames = 0    # FAIL 포함 총 프레임 수
 
 
     def start(self, timeout: Optional[float] = None) -> float:
@@ -48,7 +50,7 @@ class TimingMonitor:
         지정된 CAN ID의 메시지를 수신하며, 주기 위배 여부를 검사한다.
         
         :param timeout: 모니터링 시간 제한(초). None이면 무제한
-        :return: 최종 FAIL 스코어
+        :return: 정규화된 FAIL 스코어 (0~1)
         """
         print(f"[ INFO ] Monitoring 0x{self.target_id:X} "
               f"(Cycle={self.expected}ms ±{self.tolerance}ms) on {self.channel}")
@@ -58,6 +60,7 @@ class TimingMonitor:
         
         start_time = time.time()
         self._fail_score = 0.0  # 스코어 초기화
+        self._total_frames = 0
 
         while True:
             # timeout 체크
@@ -88,6 +91,8 @@ class TimingMonitor:
                         error = cycle - (self.expected + self.tolerance)
                     self._fail_score += error
 
+                self._total_frames += 1
+
                 # 이벤트 생성 및 저장
                 event = {
                     "type": "timing",
@@ -113,13 +118,51 @@ class TimingMonitor:
 
             self.prev_time = now
         
-        print(f"[ INFO ] Timing Monitor finished - Total FAIL score: {self._fail_score:.2f}")
-        return self._fail_score
+        # 정규화된 스코어 계산
+        normalized_score = self._normalize_fail_score(timeout or MAX_TIMEOUT)
+        print(f"[ INFO ] Timing Monitor finished")
+        print(f"    └ Total FAIL score: {self._fail_score:.2f} ms")
+        print(f"    └ Total frames: {self._total_frames}")
+        print(f"    └ Normalized score (0~1): {normalized_score:.4f}")
+        
+        return normalized_score
+
+
+    def _normalize_fail_score(self, timeout: float) -> float:
+        """
+        FAIL 스코어를 0~1 범위로 정규화
+        
+        :param timeout: 모니터링 시간 (초)
+        :return: 0~1 사이의 정규화된 스코어
+        """
+        if self._total_frames == 0:
+            return 0.0
+        
+        # 최대 프레임 수 계산
+        max_possible_frames = (timeout * 500) / self.expected
+        
+
+        worst_case_score = max_possible_frames * self.tolerance
+        
+        # 정규화: 현재 스코어 / 최악의 경우 스코어
+        normalized = min(self._fail_score / worst_case_score, 1.0)
+        
+        return normalized
 
 
     def get_fail_score(self) -> float:
         """
-        현재까지 누적된 FAIL 스코어 반환
+        현재까지 누적된 정규화된 FAIL 스코어 반환 (0~1)
+        
+        :return: 정규화된 FAIL 스코어
+        """
+        
+        return self._normalize_fail_score(MAX_TIMEOUT)
+
+
+    def get_raw_fail_score(self) -> float:
+        """
+        정규화되지 않은 원본 FAIL 스코어 반환 (ms 단위)
         
         :return: FAIL 스코어 (허용 범위를 벗어난 오차의 누적합)
         """
