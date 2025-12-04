@@ -6,7 +6,6 @@ import isotp
 import yaml
 from ..logger.base_logger import log_event
 
-
 # 모니터링 설정값
 
 CAN_CHANNEL = "can0"
@@ -26,10 +25,9 @@ isotp_params = {
 }
 
 # 스코어 가중치 설정
-SCORE_NO_RESPONSE_0x10 = 1.0   # 세션 진입 실패 (가장 치명적)
-SCORE_NO_RESPONSE_0x3E = 0.8   # Tester Present 실패
+SCORE_NO_RESPONSE_0x10 = 0.8   # 세션 진입 실패 (가장 치명적)
+SCORE_NO_RESPONSE_0x3E = 0.6   # Tester Present 실패
 MAX_DTC_COUNT = 20              # DTC 개수 정규화 기준 (20개 이상이면 1.0)
-
 
 
 # NRC config 로드
