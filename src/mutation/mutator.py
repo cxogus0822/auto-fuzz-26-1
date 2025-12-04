@@ -13,9 +13,7 @@ DEFAULT_LSB_BIAS    = 0.0
 DEFAULT_BUDGET      = 256
 DEFAULT_MAX_OPS     = 3
 
-# ★ CAN Classic 최대 DLC 제한
 MAX_CAN_DLC = 8  
-
 
 class Mutator:
     def __init__(self, data: bytes, weights: Dict[str, float], min_length: int = 1):
@@ -49,15 +47,12 @@ class Mutator:
         seen: set[bytes] = set()
         base = bytes(self.data)
 
-        # push() = mutate된 데이터 최종적으로 out에 넣기 전 검증 단계
         def push():
             b = bytes(self.data)
 
-            # ★ 8바이트 초과 payload 자동 필터링
             if len(b) > MAX_CAN_DLC:
                 return
 
-            # ★ mutate 후 최소 길이 유지
             if len(b) < self.min_length:
                 return
 
@@ -65,7 +60,6 @@ class Mutator:
                 seen.add(b)
                 out.append(b)
 
-        # 원본 데이터 포함 여부
         if include_orig:
             self.data = bytearray(base)
             push()
@@ -176,7 +170,6 @@ class Mutator:
 
     def insert_byte(self):
         try:
-            # ★ 8바이트 이상이면 insert 수행 금지
             if len(self.data) >= MAX_CAN_DLC:
                 return
 
