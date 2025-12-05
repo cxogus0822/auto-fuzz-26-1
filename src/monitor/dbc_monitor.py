@@ -191,7 +191,9 @@ class DBCMonitor:
                 self._update_fail_score()
                 raise RuntimeError(f"enum 위반: {sig} value={val}, 허용={enum_vals}")
 
-        mn, mx = rule.get("min"), rule.get("max")
+        sigmn, sigmx = rule.get("min"), rule.get("max")
+        factor, offset = rule.get("factor"), rule.get("offset")
+        mn, mx = (sigmn - offset) / factor , (sigmx - offset) / factor
 
         if mn is not None:
             self._total_checks += 1
