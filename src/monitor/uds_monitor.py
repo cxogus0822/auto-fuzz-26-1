@@ -39,8 +39,8 @@ def load_nrc_fail_list(path: str):
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
-    if not isinstance(data, dict) or "nrc_scores" not in data:
-        raise ValueError("Invalid NRC config: missing 'nrc_scores'")
+    if not isinstance(data, dict) or "nrc_fail_list" not in data:
+        raise ValueError("Invalid NRC config: missing 'nrc_fail_list'")
 
     fail_set = set()
     for item in data["nrc_fail_list"]:
@@ -170,7 +170,7 @@ class UDSMonitor:
                 log_event("uds", TARGET_UDS_ID, f"NRC_{hex(nrc)}", "fail_list_hit", "FAIL")
                 return False
             else:
-                log_event("uds", TARGET_UDS_ID, f"NRC_{hex(nrc)}", "ignored", "WARN")
+                log_event("uds", TARGET_UDS_ID, f"NRC_unknown_{hex(nrc)}", nrc, "WARN")
                 return True
 
         # 정상 응답
