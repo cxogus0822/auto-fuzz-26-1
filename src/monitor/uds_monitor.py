@@ -32,7 +32,7 @@ MAX_DTC_COUNT = 20              # DTC 개수 정규화 기준 (20개 이상이�
 
 # NRC config 로드
 
-def load_nrc_config(path: str):
+def load_nrc_fail_list(path: str):
     if not os.path.exists(path):
         raise FileNotFoundError(f"NRC config not found: {path}")
 
@@ -42,25 +42,24 @@ def load_nrc_config(path: str):
     if not isinstance(data, dict) or "nrc_scores" not in data:
         raise ValueError("Invalid NRC config: missing 'nrc_scores'")
 
-    scores = {}
-    for k, v in data["nrc_scores"].items():
+    fail_set = set()
+    for item in data["nrc_fail_list"]:
         try:
-            key = int(k, 16) if isinstance(k, str) and k.startswith("0x") else int(k)
-            scores[key] = float(v)
+            nrc = int(item, 16) if isinstance(item, str) else int(item)
+            fail_set.add(nrc)
         except Exception as e:
-            raise ValueError(f"Invalid NRC key/value {k}:{v} ({e})")
-    return scores
+            raise ValueError(f"Invalid NRC value {item} ({e})")
+
+    return fail_set
 
 
 
 # UDS 모니터 클래스
 
 class UDSMonitor:
-    def __init__(self, nrc_cfg_path: str = "config/nrc_weights.yaml"):
-        # NRC 점수 테이블 로드
-        self.NRC_CLASS = load_nrc_config(nrc_cfg_path)
+    def __init__(self, nrc_cfg_path: str = "config/nrc_fail_list.yaml"):
+        self.NRC_FAIL_SET = load_nrc_fail_list(nrc_cfg_path)
 
-        # CAN & ISO-TP 초기화
         self.bus = can.interface.Bus(channel=CAN_CHANNEL, bustype="socketcan")
         addr = isotp.Address(
             isotp.AddressingMode.Normal_11bits,
@@ -68,8 +67,7 @@ class UDSMonitor:
             rxid=TARGET_UDS_ID + UDS_RESPONSE_OFFSET
         )
         self.stack = isotp.CanStack(bus=self.bus, address=addr, params=isotp_params)
-        
-        # FAIL 스코어 누적 (0~1 범위)
+
         self._fail_score = 0.0
 
 
@@ -167,14 +165,12 @@ class UDSMonitor:
         # NRC 응답
         if resp[0] == 0x7F:
             nrc = resp[2]
-            if nrc in self.NRC_CLASS:
-                score = self.NRC_CLASS[nrc]
-                self._fail_score += score
-                log_event("uds", TARGET_UDS_ID, f"NRC_{hex(nrc)}", score, "FAIL")
+            if nrc in self.NRC_FAIL_SET:
+                self._fail_score = 1.0
+                log_event("uds", TARGET_UDS_ID, f"NRC_{hex(nrc)}", "fail_list_hit", "FAIL")
                 return False
             else:
-                # 알 수 없는 NRC는 정상으로 처리
-                log_event("uds", TARGET_UDS_ID, f"NRC_unknown_{hex(nrc)}", nrc, "WARN")
+                log_event("uds", TARGET_UDS_ID, f"NRC_{hex(nrc)}", "ignored", "WARN")
                 return True
 
         # 정상 응답
@@ -202,10 +198,9 @@ class UDSMonitor:
             # NRC 응답
             elif resp[0] == 0x7F:
                 nrc = resp[2]
-                if nrc in self.NRC_CLASS:
-                    score = self.NRC_CLASS[nrc]
-                    self._fail_score += score
-                    log_event("uds", TARGET_UDS_ID, f"DTC_NRC_{hex(nrc)}", score, "FAIL")
+                if nrc in self.NRC_FAIL_SET:
+                    self._fail_score = 1.0
+                    log_event("uds", TARGET_UDS_ID, f"DTC_NRC_{hex(nrc)}", "fail_list_hit", "FAIL")
                 else:
                     log_event("uds", TARGET_UDS_ID, "DTC_NRC_Unknown", nrc, "WARN")
                 continue
