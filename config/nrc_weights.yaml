@@ -1,9 +1,9 @@
-nrc_scores:
-  "0x10": 50
-  "0x11": 30
-  "0x12": 40
-  "0x13": 60
-  "0x22": 70
-  "0x31": 50
-  "0x33": 80
-  "0x72": 40
+nrc_fail_list:
+  - "0x11"  # ServiceNotSupported
+  - "0x12"  # SubFunctionNotSupported
+  - "0x13"  # IncorrectMessageLengthOrInvalidFormat
+  - "0x14"  # ResponseTooLong
+  - "0x24"  # RequestSequenceError
+  - "0x31"  # RequestOutOfRange
+  - "0x70"  # UploadDownloadNotAccepted
+  - "0x72"  # GeneralProgrammingFailure
