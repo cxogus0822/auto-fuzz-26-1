@@ -10,7 +10,7 @@
 
 ### 2. 레포지토리 클론
 ```bash
-git clone https://github.com/Automotive-Fuzzing/auto-fuzz.git
+git clone https://github.com/cxogus0822/auto-fuzz-26-1.git
 cd auto-fuzz
 ```
 
@@ -52,7 +52,7 @@ pip install -r requirements.txt
 ### 1. 최초 세팅 시
 #### 1️⃣ upstream 등록
 ```bash
-git remote add upstream https://github.com/Automotive-Fuzzing/auto-fuzz.git
+git remote add upstream //github.com/cxogus0822/auto-fuzz-26-1.git
 ```
 
 #### 2️⃣ 확인
