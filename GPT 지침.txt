@@ -1,0 +1,294 @@
+현재 환경은 다음과 같다.
+
+* 차량: Audi A5 2020
+* Gateway: J533
+* Raspberry Pi의 CAN 인터페이스: `can0` 하나
+* J533에서 **Powertrain CAN(P-CAN)이라고 추정한 CAN-H/CAN-L 핀**에 점프선으로 Raspberry Pi를 연결한 상태
+* P/B/I-CAN 메시지가 모두 포함된 **통합 DBC 파일**을 보유하고 있음
+
+## 목표
+
+현재 `can0`가 연결된 J533 핀이 실제로 **Powertrain CAN Bus**인지 검증하고 싶다.
+
+기존처럼 단순히 통합 DBC와 CAN ID를 매칭해서 "P-CAN 메시지가 몇 %, B-CAN 메시지가 몇 %"라고 판단하지 마라.
+
+이번에는 **실제 `can0` 트래픽을 캡처하고, 캡처 결과 + 통합 DBC의 메시지/Signal/ECU 정보를 분석해서 현재 연결된 물리 버스가 Powertrain CAN인지 판단할 수 있는 근거를 만들어라.**
+
+중요: 현재 단계에서는 검증만 수행한다. CAN 프레임을 송신하거나 fuzzing하지 말고 **수신(passive monitoring)만 수행한다.**
+
+---
+
+# 1. CAN 인터페이스 확인
+
+먼저 다음을 확인해라.
+
+* `can0` 존재 여부
+* 현재 bitrate
+* CAN 또는 CAN-FD 여부
+* interface state
+* error 상태
+
+필요한 Linux 명령어는 직접 실행해라.
+
+현재 설정을 임의로 변경하지 말고 먼저 상태를 출력하고 기록해라.
+
+---
+
+# 2. Powertrain CAN 트래픽 캡처
+
+`can0`에서 **최소 60초 동안 raw CAN traffic을 캡처**해라.
+
+`candump` 또는 적절한 SocketCAN 도구를 사용해 timestamp가 포함된 로그 파일을 생성해라.
+
+예:
+
+`pcan_capture.log`
+
+반드시 실제 캡처를 수행한 다음 분석해라.
+
+캡처하지 않은 상태에서 DBC만 보고 결과를 추측하지 마라.
+
+---
+
+# 3. Raw CAN 통계 생성
+
+캡처 결과에서 다음 정보를 추출해라.
+
+* Total CAN frames
+* Unique CAN IDs
+* 각 CAN ID
+* DLC
+* 수신 횟수
+* 초당 수신 횟수
+* 평균 주기
+* 최소/최대 주기
+* 대표 payload
+* payload 변화 여부
+
+CAN ID별 통계 테이블을 생성해라.
+
+---
+
+# 4. 통합 DBC와 비교
+
+내가 가진 DBC는 P/B/I-CAN이 모두 포함된 **통합 DBC**다.
+
+따라서 CAN ID가 DBC에 존재한다는 이유만으로 물리 CAN domain을 결정하지 마라.
+
+각 수신 ID에 대해 가능하면 다음 정보를 추출해라.
+
+* DBC Message Name
+* Transmitter ECU
+* Receiver ECU
+* Signal Names
+* Signal 의미
+* DLC
+* 주기 정보가 존재한다면 DBC Cycle Time
+
+그리고 실제 캡처 결과와 비교해라.
+
+---
+
+# 5. Powertrain 관련 증거 추출
+
+현재 물리 버스가 **Powertrain CAN이라고 가정하고 이를 검증**한다.
+
+특히 다음과 관련된 메시지/Signal/ECU가 실제 캡처에서 지속적으로 존재하는지 찾아라.
+
+* Engine
+* ECM / ECU
+* Transmission / TCU
+* Engine RPM
+* Engine Torque
+* Requested Torque
+* Vehicle Speed
+* Gear Position
+* Accelerator Pedal
+* Throttle
+* Brake 관련 drivetrain signal
+* Powertrain status
+* Drivetrain
+* Ignition / engine running state
+
+단순 문자열 검색만 하지 말고 Message Name, Signal Name, Transmitter ECU를 종합해서 판단해라.
+
+Powertrain에 강하게 종속된 메시지를 별도로 추출해라.
+
+---
+
+# 6. B-CAN / I-CAN 관련 메시지도 조사
+
+캡처된 메시지 중 다음 영역으로 보이는 것도 분류해라.
+
+B-CAN 예:
+
+* Door
+* Window
+* Seat
+* Lock
+* Light
+* Comfort
+* Body Control
+* HVAC
+
+I-CAN 예:
+
+* MMI
+* Navigation
+* Audio
+* Multimedia
+* Display
+* Infotainment
+
+하지만 이러한 메시지가 발견됐다는 이유만으로 현재 버스가 B-CAN 또는 I-CAN이라고 판단하지 마라.
+
+J533 Gateway에 의해 다른 domain에서 필요한 정보가 routing됐을 가능성과 통합 DBC의 분류 한계를 반드시 고려해라.
+
+---
+
+# 7. CAN ID를 4개 그룹으로 분류
+
+캡처된 unique CAN ID를 가능한 범위에서 다음 네 그룹으로 분류해라.
+
+### A. Strong P-CAN Evidence
+
+Powertrain ECU가 송신하고 Powertrain 기능과 직접 관련되어 있어 현재 물리 버스가 P-CAN이라는 강한 근거가 되는 메시지.
+
+### B. Possible P-CAN
+
+Powertrain과 관련되어 있지만 다른 domain에서도 사용될 가능성이 있는 메시지.
+
+### C. Cross-Domain / Gateway Candidate
+
+B-CAN 또는 I-CAN 기능과 관련되지만 현재 캡처에서 발견되어 Gateway routing 또는 cross-domain 공유 가능성이 있는 메시지.
+
+### D. Ambiguous
+
+통합 DBC만으로 물리 domain을 판단할 수 없는 메시지.
+
+억지로 모든 메시지를 P/B/I 중 하나로 분류하지 마라.
+
+---
+
+# 8. Frame 비율과 Unique ID 비율을 분리
+
+반드시 두 가지 통계를 따로 계산해라.
+
+### Frame-based
+
+전체 CAN frame 중 Powertrain 관련 frame이 차지하는 비율.
+
+### Unique-ID-based
+
+전체 unique CAN ID 중 Powertrain 관련 ID가 차지하는 비율.
+
+예를 들어 10 ms 주기의 Powertrain 메시지 하나가 수천 번 들어왔다고 해서 그것만으로 P-CAN이라고 판단하지 마라.
+
+---
+
+# 9. 최종 Powertrain CAN 판정
+
+다음 형식으로 결과를 출력해라.
+
+[Powertrain CAN Physical Domain Verification]
+
+Capture interface:
+can0
+
+Capture duration:
+XX seconds
+
+Total frames:
+XXXX
+
+Unique CAN IDs:
+XX
+
+### Strong P-CAN Evidence
+
+| CAN ID | Message | Transmitter | Important Signals | Cycle | Evidence |
+| ------ | ------- | ----------- | ----------------- | ----- | -------- |
+
+### Possible P-CAN
+
+| CAN ID | Message | Evidence |
+| ------ | ------- | -------- |
+
+### Cross-Domain / Gateway Candidates
+
+| CAN ID | DBC Classification | Evidence | Possible explanation |
+| ------ | ------------------ | -------- | -------------------- |
+
+### Ambiguous
+
+| CAN ID | Reason |
+| ------ | ------ |
+
+### Statistics
+
+Frame-based:
+
+* Strong/Probable Powertrain: XX%
+* Cross-domain: XX%
+* Ambiguous: XX%
+
+Unique-ID-based:
+
+* Strong/Probable Powertrain: XX%
+* Cross-domain: XX%
+* Ambiguous: XX%
+
+### Final Verdict
+
+다음 중 하나로 판정해라.
+
+* CONFIRMED POWERTRAIN CAN
+* HIGHLY LIKELY POWERTRAIN CAN
+* POSSIBLE POWERTRAIN CAN
+* INCONCLUSIVE
+* UNLIKELY POWERTRAIN CAN
+
+Confidence:
+0~100%
+
+### 가장 강한 판단 근거
+
+1.
+2.
+3.
+4.
+5.
+
+---
+
+# 10. 과도한 확정 금지
+
+매우 중요하다.
+
+현재 환경은
+
+* `can0` 하나
+* 통합 DBC 하나
+* J533의 한 CAN-H/L pair
+
+를 대상으로 한 분석이다.
+
+따라서 이 정보만으로 물리 Powertrain CAN임을 100% 증명할 수 없다면 `CONFIRMED`라고 표현하지 마라.
+
+예를 들어 Powertrain 관련 메시지가 60%라는 이유 하나만으로 P-CAN이라고 확정하지 마라.
+
+**어떤 CAN ID, 어떤 송신 ECU, 어떤 Signal이 실제로 관찰됐기 때문에 Powertrain CAN이라고 판단했는지를 근거로 제시해라.**
+
+---
+
+# 11. 분석 결과 파일 저장
+
+분석이 끝나면 현재 디렉터리에 다음 파일을 남겨라.
+
+* `pcan_capture.log` : 원본 CAN 캡처
+* `pcan_analysis.csv` : CAN ID별 분석 결과
+* `pcan_verification.md` : 전체 분석 및 최종 판정
+
+`pcan_verification.md`만 읽어도 왜 이 물리 연결을 Powertrain CAN으로 판단했는지 재현 가능하도록 작성해라.
+
+우선 현재 디렉터리의 DBC 파일을 찾아 구조를 분석하고, `can0`의 현재 설정을 확인한 후 실제 60초 캡처부터 시작해라.
