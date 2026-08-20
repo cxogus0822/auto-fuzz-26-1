@@ -1,0 +1,238 @@
+Raspberry Pi B/I/C-CAN 실험 도구 사용법
+========================================
+
+0. 구성과 파일 역할
+-------------------
+
+이 폴더는 송신과 수신을 별도 프로세스로 실행하도록 구성되어 있습니다.
+
+  can_receiver.py             모든 raw CAN 프레임 저장 + 선택 신호 DBC 해석
+  can_sender.py               raw frame 또는 DBC 신호 변경 frame 송신
+  dbc_lookup.py               다른 ID/신호를 찾을 때 사용하는 DBC 검색기
+  self_test.py                CAN 장비 없이 설치 및 DBC encode/decode 검사
+  receiver_b_can.yaml         B-CAN Pi 수신 설정
+  receiver_i_can.yaml         I-CAN Pi 수신 설정
+  receiver_c_can.yaml         C-CAN Pi 수신 설정
+  sender_hazard_button.yaml   0x65A Hazard 버튼 후보 송신 설정
+  sender_hazard_status.yaml   0x366 Hazard 상태 후보 송신 설정
+  DBC_ANALYSIS.txt            제공된 DBC의 Hazard 관련 분석
+
+같은 can_receiver.py를 세 Pi에서 실행하며 YAML만 다르게 사용합니다.
+B-CAN Pi에서는 수신기를 터미널 1에서 계속 실행하고, 송신기를 터미널 2에서 실행합니다.
+
+
+1. 반드시 먼저 확인할 사항
+--------------------------
+
+이 코드는 허가된 시험 차량 또는 격리된 벤치에서만 사용합니다.
+실제 주행 중에는 송신하지 마십시오. 전류 제한 전원과 즉시 차단 수단을 준비하십시오.
+
+제공된 파일은 파일명과 내용상 I-CAN K-Matrix입니다. 따라서 0x65A/0x366이 B-CAN에
+실제로 존재한다고 단정할 수 없습니다. 처음에는 송신하지 말고 세 버스에서 수신한 뒤,
+차량의 Hazard 스위치를 직접 눌러 어느 버스에서 어떤 신호가 변하는지 확인하십시오.
+
+CAN-H/CAN-L/GND를 확인하고, 기존 차량 버스에 연결할 때 임의로 120옴 종단저항을
+추가하지 마십시오. 실험 장치만 구성한 벤치라면 양 끝 종단 구성을 별도로 확인하십시오.
+
+
+2. Raspberry Pi 준비
+--------------------
+
+세 Pi 모두 저장소 전체를 같은 경로에 복사하는 방법을 권장합니다. YAML의 DBC 경로가
+../dbc/MLBevo_Gen2_ICAN_KMatrix.dbc 이므로 pi_can_lab과 dbc 폴더가 서로 같은 상위
+폴더에 있어야 합니다.
+
+각 Pi에서 저장소 루트로 이동한 후 다음을 실행합니다.
+
+  sudo apt update
+  sudo apt install -y python3-venv can-utils
+  python3 -m venv .venv
+  source .venv/bin/activate
+  python3 -m pip install --upgrade pip
+  python3 -m pip install -r pi_can_lab/requirements.txt
+
+CAN 장비 드라이버 또는 Device Tree overlay 설정은 사용하는 HAT/USB-CAN 제품 설명서를
+따릅니다. 이 도구는 Linux SocketCAN 채널 이름이 can0이라고 가정합니다.
+
+
+3. SocketCAN 채널 설정
+----------------------
+
+bitrate는 실제 차량/벤치 설정과 반드시 같아야 합니다. 현재 프로젝트의 예상값은
+B-CAN 100000 bit/s, I-CAN과 C-CAN 500000 bit/s입니다. 확정값이 아니므로 장비와
+차량 문서로 다시 확인하십시오.
+
+B-CAN Pi 예시:
+
+  sudo ip link set can0 down
+  sudo ip link set can0 type can bitrate 100000 restart-ms 100
+  sudo ip link set can0 up
+  ip -details -statistics link show can0
+
+I-CAN/C-CAN Pi 예시:
+
+  sudo ip link set can0 down
+  sudo ip link set can0 type can bitrate 500000 restart-ms 100
+  sudo ip link set can0 up
+  ip -details -statistics link show can0
+
+먼저 아래 명령으로 프레임이 들어오는지 확인할 수 있습니다.
+
+  candump can0
+
+수신이 전혀 없거나 error counter가 증가하면 송신하지 말고 배선, GND, bitrate부터
+다시 확인하십시오.
+
+
+4. 장비 없이 설치 검사
+----------------------
+
+각 Pi에서 한 번씩 실행하십시오.
+
+  source .venv/bin/activate
+  python3 pi_can_lab/self_test.py
+
+마지막에 다음 문구가 나와야 합니다.
+
+  [PASS] 모든 self-test 통과
+
+
+5. 세 Pi 수신 시작
+------------------
+
+각 Pi에서 저장소 루트를 현재 디렉터리로 두고 실행합니다.
+
+B-CAN Pi:
+
+  python3 pi_can_lab/can_receiver.py --config pi_can_lab/receiver_b_can.yaml
+
+I-CAN Pi:
+
+  python3 pi_can_lab/can_receiver.py --config pi_can_lab/receiver_i_can.yaml
+
+C-CAN Pi:
+
+  python3 pi_can_lab/can_receiver.py --config pi_can_lab/receiver_c_can.yaml
+
+Ctrl+C로 종료합니다. 기본 설정은 모든 raw 프레임을 다음 파일에 계속 추가합니다.
+
+  pi_can_lab/logs/b_can.jsonl
+  pi_can_lab/logs/i_can.jsonl
+  pi_can_lab/logs/c_can.jsonl
+
+화면에는 Hazard 후보 신호가 처음 관찰되거나 값이 바뀔 때만 출력됩니다. 화면에 보이지
+않는 ID도 log_all: true 설정 때문에 JSONL에는 저장됩니다.
+
+각 실험 전에 기존 JSONL을 보관하거나 YAML의 output 파일명을 바꾸십시오. 동일한 파일이
+있으면 새 세션은 파일 끝에 추가됩니다.
+
+
+6. 첫 번째 안전한 확인 절차
+---------------------------
+
+  1) 세 Pi의 시간을 chrony/NTP로 동기화합니다.
+  2) 세 Pi에서 수신기를 시작합니다.
+  3) 아무 동작 없이 10초 이상 baseline을 기록합니다.
+  4) 차량의 실제 Hazard 버튼을 한 번 누릅니다.
+  5) 다시 눌러 끄고 5초 이상 기록합니다.
+  6) 화면과 JSONL에서 아래 신호가 변했는지 확인합니다.
+
+     0x65A BCM_01       / BCM1_Warnblink_Taster
+     0x366 Blinkmodi_02 / BM_Warnblinken
+
+0x65A는 버튼 입력 후보이고 0x366은 실제 점멸 상태 후보입니다. 둘 중 하나 또는 둘 다
+관찰될 수 있습니다. B-CAN에서 보이지 않고 I-CAN에서만 보이면 제공된 DBC가 I-CAN용인
+것과 일치하므로 B-CAN 송신 설정을 그대로 사용하면 안 됩니다.
+
+
+7. DBC 기반 송신: 반드시 preview부터
+---------------------------------------
+
+송신기는 기본적으로 실제 송신을 하지 않습니다. 우선 B-CAN Pi의 두 번째 터미널에서
+preview를 실행합니다. 수신기는 첫 번째 터미널에서 계속 실행해 둡니다.
+
+Hazard 버튼 입력 후보 0x65A:
+
+  python3 pi_can_lab/can_sender.py --config pi_can_lab/sender_hazard_button.yaml
+
+Hazard 동작 상태 후보 0x366:
+
+  python3 pi_can_lab/can_sender.py --config pi_can_lab/sender_hazard_status.yaml
+
+두 설정 모두 먼저 현재 버스에서 같은 ID의 정상 프레임을 최대 5초 기다립니다. 받은
+8바이트 원본에서 Hazard 신호 하나만 바꾸고 나머지 신호는 유지합니다. 해당 ID가 실제로
+수신되지 않으면 송신기는 오류로 종료되며 임의의 0 payload를 만들지 않습니다.
+
+preview의 ID, BASE, 변경 DATA를 확인한 뒤에만 --execute를 붙입니다.
+
+  python3 pi_can_lab/can_sender.py --config pi_can_lab/sender_hazard_button.yaml --execute
+
+기본 설정은 변경 프레임 1개를 보낸 뒤 100ms 후 캡처했던 원본 프레임 1개를 송신합니다.
+이 복원 프레임은 버스 payload 복원 보조 기능일 뿐 ECU 내부 상태 복구를 보장하지 않습니다.
+
+
+8. Raw 프레임 송신
+------------------
+
+먼저 preview:
+
+  python3 pi_can_lab/can_sender.py --channel can0 --id 0x123 --data "00 11 22 33 44 55 66 77"
+
+확인 후 실제 송신:
+
+  python3 pi_can_lab/can_sender.py --channel can0 --id 0x123 --data "00 11 22 33 44 55 66 77" --execute
+
+반복 횟수와 간격 지정:
+
+  python3 pi_can_lab/can_sender.py --channel can0 --id 0x123 --data "00 11 22 33 44 55 66 77" --count 5 --interval-ms 100 --execute
+
+기본 안전 제한은 count 최대 100, 반복 간격 최소 10ms입니다. CAN FD는 --fd를 명시해야
+8바이트를 넘길 수 있습니다. 현재 제공된 DBC 후보는 Classic CAN 8바이트입니다.
+
+
+9. 다른 케이스로 변경
+---------------------
+
+먼저 DBC에서 메시지와 신호를 검색합니다.
+
+  python3 pi_can_lab/dbc_lookup.py --dbc dbc/MLBevo_Gen2_ICAN_KMatrix.dbc --search warnblink
+  python3 pi_can_lab/dbc_lookup.py --dbc dbc/MLBevo_Gen2_ICAN_KMatrix.dbc --id 0x366
+  python3 pi_can_lab/dbc_lookup.py --dbc dbc/MLBevo_Gen2_ICAN_KMatrix.dbc --message Blinkmodi_02
+
+새 수신 케이스는 receiver_b_can.yaml을 복사한 뒤 receiver.watch 아래의 ids, messages,
+signals를 바꿉니다. ID만 바꾸는 것이 아니라 그 ID에 속한 정확한 DBC message와 signal도
+같이 바꿔야 합니다. raw 전체 기록은 계속 유지됩니다.
+
+새 DBC 송신 케이스는 sender_hazard_button.yaml을 복사한 뒤 다음 항목을 바꿉니다.
+
+  sender.dbc
+  sender.id
+  sender.message
+  sender.set
+
+CRC, checksum, counter, *_BZ 같은 신호가 들어 있는 메시지는 단순 신호 변경 후 ECU가
+거부할 수 있습니다. 송신기는 이런 메시지를 기본적으로 거부합니다. 알고리즘을 구현했거나
+의도적으로 비정상 CRC를 시험할 때만 --allow-protected를 사용하십시오.
+
+
+10. 문제 해결
+-------------
+
+"필수 패키지가 없습니다"
+  source .venv/bin/activate 후 requirements.txt를 다시 설치합니다.
+
+"DBC 파일을 찾을 수 없습니다"
+  저장소 전체를 복사했는지 확인합니다. pi_can_lab과 dbc가 같은 상위 폴더에 있어야 합니다.
+
+"원본 프레임을 수신하지 못했습니다"
+  잘못된 버스, bitrate, ID 또는 I-CAN DBC를 B-CAN에 적용한 경우일 수 있습니다.
+  candump can0과 can_receiver.py raw 로그를 먼저 확인합니다.
+
+"Network is down"
+  ip link set can0 up이 되지 않았거나 CAN 장비 드라이버 설정이 완료되지 않았습니다.
+
+"decode_error"
+  DLC가 DBC 정의와 다르거나 해당 버스/차량 버전에 맞지 않는 DBC일 수 있습니다.
+
+세 Pi 로그의 시간을 비교하려면 NTP/chrony 상태를 확인하고, 각 실험 시작/종료 시각을
+기록하십시오. 다음 단계에서는 이 세 JSONL을 trial 단위로 자동 병합할 수 있습니다.
