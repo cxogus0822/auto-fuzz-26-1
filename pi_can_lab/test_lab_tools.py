@@ -11,7 +11,12 @@ from unittest.mock import patch
 from analyze_fuzz_response import analyse_bus, build_parser as build_analysis_parser, run as run_analysis
 from can_common import ConfigurationError
 from can_receiver import build_parser as build_receiver_parser, run as run_receiver, validate_runtime_number
-from can_sender import capture_live_payload, generate_mutations, mutation_summary
+from can_sender import (
+    capture_live_payload,
+    generate_mutations,
+    mutation_summary,
+    transmission_schedule,
+)
 
 
 class MutationTests(unittest.TestCase):
@@ -37,6 +42,49 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(summary["changed_byte_indexes"], [2])
         self.assertEqual(summary["xor_hex"], "0000100000000000")
         self.assertEqual(summary["changed_bit_count"], 1)
+
+    def test_duration_schedule_cycles_mutations_until_deadline(self) -> None:
+        class FakeClock:
+            def __init__(self) -> None:
+                self.now = 0.0
+                self.sleeps: list[float] = []
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def sleep(self, seconds: float) -> None:
+                self.sleeps.append(seconds)
+                self.now += seconds
+
+        clock = FakeClock()
+        first = bytes.fromhex("01")
+        second = bytes.fromhex("02")
+        scheduled = list(
+            transmission_schedule(
+                [first, second],
+                interval_seconds=0.4,
+                duration_seconds=1.0,
+                clock=clock.monotonic,
+                sleeper=clock.sleep,
+            )
+        )
+        self.assertEqual(scheduled, [(1, first), (2, second), (3, first)])
+        self.assertEqual(clock.now, 1.0)
+        self.assertEqual(clock.sleeps[:2], [0.4, 0.4])
+        self.assertAlmostEqual(clock.sleeps[2], 0.2)
+
+    def test_count_schedule_still_sends_corpus_once(self) -> None:
+        sleeps: list[float] = []
+        payloads = [bytes.fromhex("01"), bytes.fromhex("02")]
+        scheduled = list(
+            transmission_schedule(
+                payloads,
+                interval_seconds=0.01,
+                sleeper=sleeps.append,
+            )
+        )
+        self.assertEqual(scheduled, [(1, payloads[0]), (2, payloads[1])])
+        self.assertEqual(sleeps, [0.01])
 
     def test_live_baseline_requires_configured_stability(self) -> None:
         class FakeBus:
@@ -115,6 +163,7 @@ class ReceiverValidationTests(unittest.TestCase):
             self.assertEqual(frame["data_hex"], "00000000200000F0")
             self.assertTrue(frame["session_id"])
             self.assertEqual(records[0]["session_id"], frame["session_id"])
+            self.assertTrue(output.with_suffix(".md").is_file())
             self.assertTrue(bus.closed)
 
 

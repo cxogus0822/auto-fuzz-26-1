@@ -6,6 +6,8 @@ receiver:
   bus_name: i_can
   dbc: ../A5.dbc
   output: logs/i_can.jsonl
+  output_policy: numbered
+  write_report: true
   duration_seconds: 0
   recv_timeout_seconds: 1.0
   stats_interval_seconds: 5.0

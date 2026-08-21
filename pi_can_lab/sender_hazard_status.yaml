@@ -6,6 +6,7 @@ sender:
   bus_name: b_can
   dbc: ../A5.dbc
   output: logs/b_can_tx.jsonl
+  output_policy: numbered
 
   # DBC: Blinkmodi_02, standard ID 0x366, 8 bytes
   message: Blinkmodi_02

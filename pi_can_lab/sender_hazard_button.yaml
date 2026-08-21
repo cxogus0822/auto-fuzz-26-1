@@ -6,6 +6,7 @@ sender:
   bus_name: b_can
   dbc: ../A5.dbc
   output: logs/b_can_tx.jsonl
+  output_policy: numbered
 
   # DBC: BCM_01, standard ID 0x65A, 8 bytes
   message: BCM_01

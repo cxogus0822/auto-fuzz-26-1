@@ -6,6 +6,7 @@ sender:
   bus_name: b_can
   dbc: ../A5.dbc
   output: logs/b_can_hazard_mutation_tx.jsonl
+  output_policy: numbered
 
   # A5.dbc: Blinkmodi_02, standard ID 0x366, DLC 8.
   # live payload에서 BM_Warnblinken을 먼저 ON으로 patch한 뒤 그 payload를
@@ -31,6 +32,8 @@ sender:
 
   transmit:
     count: 256
+    # 256개 mutation을 순환하며 30초 동안 계속 송신합니다.
+    duration_seconds: 30.0
     interval_ms: 10.0
     send_timeout_seconds: 1.0
     restore_original: true
@@ -39,5 +42,6 @@ sender:
 
   safety:
     max_count: 256
+    max_duration_seconds: 30.0
     min_interval_ms: 10.0
     allow_protected_dbc_patch: false
