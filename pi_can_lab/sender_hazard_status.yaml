@@ -4,7 +4,7 @@ bus:
 
 sender:
   bus_name: b_can
-  dbc: ../dbc/MLBevo_Gen2_ICAN_KMatrix.dbc
+  dbc: ../A5.dbc
   output: logs/b_can_tx.jsonl
 
   # DBC: Blinkmodi_02, standard ID 0x366, 8 bytes

@@ -45,7 +45,7 @@ def virtual_bus_round_trip() -> None:
 
 
 def main() -> int:
-    default_dbc = Path(__file__).resolve().parent.parent / "dbc" / "MLBevo_Gen2_ICAN_KMatrix.dbc"
+    default_dbc = Path(__file__).resolve().parent.parent / "A5.dbc"
     parser = argparse.ArgumentParser(description="Pi CAN Lab 설치/DBC self-test")
     parser.add_argument("--dbc", default=str(default_dbc), help="테스트할 DBC")
     args = parser.parse_args()

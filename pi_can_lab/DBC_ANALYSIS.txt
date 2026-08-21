@@ -4,7 +4,7 @@
 분석 대상
 ---------
 
-  dbc/MLBevo_Gen2_ICAN_KMatrix.dbc
+  A5.dbc
   원본명: MLBevo_Gen2 / ICAN KMatrix / V8.21.01F / 2021-01-29
   메시지 정의 수: 561
   신호 정의 수: 4511
@@ -102,10 +102,10 @@ cycle time은 1000ms입니다. 단, 실제 차량 variant와 gateway 동작에 �
 내일 실험에서 먼저 확정할 내용
 -------------------------------
 
-  1) B/I/C-CAN 각각의 실제 bitrate와 Classic CAN/CAN FD 여부
+  1) B/I/P/C-CAN 각각의 실제 bitrate와 Classic CAN/CAN FD 여부
   2) B-CAN에서 0x65A 또는 0x366이 실제로 관찰되는지
   3) 실제 Hazard 버튼 조작 시 어느 ID/신호가 변화하는지
-  4) 세 Pi의 시간 동기화 상태
+  4) 모든 송수신 장비의 시간 동기화 상태
   5) 정상 frame 주기와 payload baseline
 
 수신기는 모든 raw ID를 저장하므로 후보 ID가 틀려도 데이터가 사라지지 않습니다. Hazard
