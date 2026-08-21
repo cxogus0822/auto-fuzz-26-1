@@ -1,5 +1,5 @@
-Raspberry Pi B/I/C-CAN 실험 도구 사용법
-========================================
+Raspberry Pi B/I/P/C-CAN 실험 도구 사용법
+==========================================
 
 0. 구성과 파일 역할
 -------------------
@@ -12,13 +12,56 @@ Raspberry Pi B/I/C-CAN 실험 도구 사용법
   self_test.py                CAN 장비 없이 설치 및 DBC encode/decode 검사
   receiver_b_can.yaml         B-CAN Pi 수신 설정
   receiver_i_can.yaml         I-CAN Pi 수신 설정
+  receiver_p_can.yaml         P-CAN Pi 수신 설정
   receiver_c_can.yaml         C-CAN Pi 수신 설정
   sender_hazard_button.yaml   0x65A Hazard 버튼 후보 송신 설정
   sender_hazard_status.yaml   0x366 Hazard 상태 후보 송신 설정
+  sender_hazard_mutation.yaml 상위 Mutator 기반 0x366 mutation 설정
+  analyze_fuzz_response.py    TX manifest와 I/P-CAN 로그 상관분석
   DBC_ANALYSIS.txt            제공된 DBC의 Hazard 관련 분석
 
-같은 can_receiver.py를 세 Pi에서 실행하며 YAML만 다르게 사용합니다.
+같은 can_receiver.py를 각 수신 장비에서 실행하며 YAML만 다르게 사용합니다.
 B-CAN Pi에서는 수신기를 터미널 1에서 계속 실행하고, 송신기를 터미널 2에서 실행합니다.
+
+
+빠른 실행 순서
+--------------
+
+아래 명령은 모두 저장소 루트(auto-fuzz-26-1)에서 실행합니다. 먼저 각 장비의 시간을
+NTP/chrony로 동기화하고 I-CAN/P-CAN 수신기를 시작합니다.
+
+  # I-CAN 장비
+  python3 pi_can_lab/can_receiver.py --config pi_can_lab/receiver_i_can.yaml
+
+  # P-CAN 장비
+  python3 pi_can_lab/can_receiver.py --config pi_can_lab/receiver_p_can.yaml
+
+B-CAN 장비에서는 can0 상태와 0x366 수신 여부를 확인한 뒤 mutation preview를 실행합니다.
+preview에는 실제 CAN 송신이 없습니다. live base는 같은 0x366 payload가 연속 3회 잡혀야
+확정되므로, 5초 안에 조건을 만족하지 못하면 송신하지 않고 종료합니다. candump는 0x366이
+반복 수신되는 것을 확인한 뒤 Ctrl+C로 끝냅니다.
+
+  ip -details -statistics link show can0
+  candump can0,366:7FF
+  python3 pi_can_lab/can_sender.py \
+    --config pi_can_lab/sender_hazard_mutation.yaml --count 16
+
+preview의 ID, BASE, mutation 수와 payload를 검토한 후 격리된 벤치에서만 실행합니다.
+
+  python3 pi_can_lab/can_sender.py \
+    --config pi_can_lab/sender_hazard_mutation.yaml --execute
+
+송신 종료 후에도 I-CAN/P-CAN 수신을 10초 이상 유지하고 Ctrl+C로 종료합니다. 각 장비의
+pi_can_lab/logs/*.jsonl을 분석 PC의 같은 경로로 모은 다음 반응 보고서를 생성합니다.
+
+  python3 pi_can_lab/analyze_fuzz_response.py \
+    --tx pi_can_lab/logs/b_can_hazard_mutation_tx.jsonl \
+    --rx i_can=pi_can_lab/logs/i_can.jsonl \
+    --rx p_can=pi_can_lab/logs/p_can.jsonl \
+    --dbc A5.dbc \
+    --output pi_can_lab/logs/hazard_response.json
+
+상세 설정, 안전 제한, 결과 해석은 아래 절을 따릅니다.
 
 
 1. 반드시 먼저 확인할 사항
@@ -38,9 +81,9 @@ CAN-H/CAN-L/GND를 확인하고, 기존 차량 버스에 연결할 때 임의로
 2. Raspberry Pi 준비
 --------------------
 
-세 Pi 모두 저장소 전체를 같은 경로에 복사하는 방법을 권장합니다. YAML의 DBC 경로가
-../dbc/MLBevo_Gen2_ICAN_KMatrix.dbc 이므로 pi_can_lab과 dbc 폴더가 서로 같은 상위
-폴더에 있어야 합니다.
+각 장비에는 저장소 전체를 같은 경로에 복사하는 방법을 권장합니다. YAML은 저장소 루트의
+A5.dbc를 사용하고 mutation 송신기는 상위 src/mutation/mutator.py를 직접 불러오므로
+pi_can_lab 폴더만 따로 복사하면 안 됩니다.
 
 각 Pi에서 저장소 루트로 이동한 후 다음을 실행합니다.
 
@@ -69,7 +112,7 @@ B-CAN Pi 예시:
   sudo ip link set can0 up
   ip -details -statistics link show can0
 
-I-CAN/C-CAN Pi 예시:
+I-CAN/P-CAN/C-CAN Pi 예시:
 
   sudo ip link set can0 down
   sudo ip link set can0 type can bitrate 500000 restart-ms 100
@@ -97,8 +140,8 @@ I-CAN/C-CAN Pi 예시:
   [PASS] 모든 self-test 통과
 
 
-5. 세 Pi 수신 시작
-------------------
+5. 수신 장비 시작
+-----------------
 
 각 Pi에서 저장소 루트를 현재 디렉터리로 두고 실행합니다.
 
@@ -114,10 +157,15 @@ C-CAN Pi:
 
   python3 pi_can_lab/can_receiver.py --config pi_can_lab/receiver_c_can.yaml
 
+P-CAN Pi:
+
+  python3 pi_can_lab/can_receiver.py --config pi_can_lab/receiver_p_can.yaml
+
 Ctrl+C로 종료합니다. 기본 설정은 모든 raw 프레임을 다음 파일에 계속 추가합니다.
 
   pi_can_lab/logs/b_can.jsonl
   pi_can_lab/logs/i_can.jsonl
+  pi_can_lab/logs/p_can.jsonl
   pi_can_lab/logs/c_can.jsonl
 
 화면에는 Hazard 후보 신호가 처음 관찰되거나 값이 바뀔 때만 출력됩니다. 화면에 보이지
@@ -130,8 +178,8 @@ Ctrl+C로 종료합니다. 기본 설정은 모든 raw 프레임을 다음 파�
 6. 첫 번째 안전한 확인 절차
 ---------------------------
 
-  1) 세 Pi의 시간을 chrony/NTP로 동기화합니다.
-  2) 세 Pi에서 수신기를 시작합니다.
+  1) 모든 송수신 장비의 시간을 chrony/NTP로 동기화합니다.
+  2) 사용할 각 버스에서 수신기를 시작합니다.
   3) 아무 동작 없이 10초 이상 baseline을 기록합니다.
   4) 차량의 실제 Hazard 버튼을 한 번 누릅니다.
   5) 다시 눌러 끄고 5초 이상 기록합니다.
@@ -171,8 +219,38 @@ preview의 ID, BASE, 변경 DATA를 확인한 뒤에만 --execute를 붙입니�
 이 복원 프레임은 버스 payload 복원 보조 기능일 뿐 ECU 내부 상태 복구를 보장하지 않습니다.
 
 
-8. Raw 프레임 송신
-------------------
+8. 상위 Mutator 기반 Hazard mutation
+---------------------------------------
+
+sender_hazard_mutation.yaml은 B-CAN에서 수신한 0x366 live payload를 A5.dbc로 해석하고,
+BM_Warnblinken=1을 적용한 payload를 상위 저장소 Mutator의 seed로 사용합니다. 기본값은
+seed를 첫 프레임으로 포함한 뒤 총 256개를 생성하며 DLC 8을 유지합니다. random_seed=366
+이므로 같은 base payload에서는 같은 mutation 목록을 재현할 수 있습니다.
+
+먼저 preview:
+
+  python3 pi_can_lab/can_sender.py --config pi_can_lab/sender_hazard_mutation.yaml
+
+작은 dry campaign 확인:
+
+  python3 pi_can_lab/can_sender.py --config pi_can_lab/sender_hazard_mutation.yaml --count 16
+
+I-CAN/P-CAN 수신을 10초 이상 먼저 시작한 뒤에만 실제 송신:
+
+  python3 pi_can_lab/can_sender.py --config pi_can_lab/sender_hazard_mutation.yaml --execute
+
+OFF seed 기반 캠페인은 CLI set으로 YAML 값을 덮어씁니다.
+
+  python3 pi_can_lab/can_sender.py --config pi_can_lab/sender_hazard_mutation.yaml \
+    --set BM_Warnblinken=0 --execute
+
+manifest에는 각 payload의 XOR, 변경 byte/bit 수, 난수 seed와 send() 호출 직전 시각이
+저장됩니다. 일반 Mutator는 BM_Warnblinken만이 아니라 0x366 전체 payload를 변조합니다.
+Hazard signal-only ON/OFF 검증은 sender_hazard_status.yaml을 사용하십시오.
+
+
+9. Raw 프레임 송신
+-------------------
 
 먼저 preview:
 
@@ -190,14 +268,14 @@ preview의 ID, BASE, 변경 DATA를 확인한 뒤에만 --execute를 붙입니�
 8바이트를 넘길 수 있습니다. 현재 제공된 DBC 후보는 Classic CAN 8바이트입니다.
 
 
-9. 다른 케이스로 변경
----------------------
+10. 다른 케이스로 변경
+-----------------------
 
 먼저 DBC에서 메시지와 신호를 검색합니다.
 
-  python3 pi_can_lab/dbc_lookup.py --dbc dbc/MLBevo_Gen2_ICAN_KMatrix.dbc --search warnblink
-  python3 pi_can_lab/dbc_lookup.py --dbc dbc/MLBevo_Gen2_ICAN_KMatrix.dbc --id 0x366
-  python3 pi_can_lab/dbc_lookup.py --dbc dbc/MLBevo_Gen2_ICAN_KMatrix.dbc --message Blinkmodi_02
+  python3 pi_can_lab/dbc_lookup.py --dbc A5.dbc --search warnblink
+  python3 pi_can_lab/dbc_lookup.py --dbc A5.dbc --id 0x366
+  python3 pi_can_lab/dbc_lookup.py --dbc A5.dbc --message Blinkmodi_02
 
 새 수신 케이스는 receiver_b_can.yaml을 복사한 뒤 receiver.watch 아래의 ids, messages,
 signals를 바꿉니다. ID만 바꾸는 것이 아니라 그 ID에 속한 정확한 DBC message와 signal도
@@ -215,14 +293,32 @@ CRC, checksum, counter, *_BZ 같은 신호가 들어 있는 메시지는 단순 
 의도적으로 비정상 CRC를 시험할 때만 --allow-protected를 사용하십시오.
 
 
-10. 문제 해결
+11. Fuzzer 반응 상관분석
+------------------------
+
+세 장비의 시간이 NTP/chrony로 동기화되어 있어야 합니다. 수신 로그와 TX manifest를 한
+PC로 복사한 뒤 baseline 10초, 마지막 송신 후 반응 2초, recovery 10초를 비교합니다.
+
+  python3 pi_can_lab/analyze_fuzz_response.py \
+    --tx pi_can_lab/logs/b_can_hazard_mutation_tx.jsonl \
+    --rx i_can=pi_can_lab/logs/i_can.jsonl \
+    --rx p_can=pi_can_lab/logs/p_can.jsonl \
+    --dbc A5.dbc \
+    --output pi_can_lab/logs/hazard_response.json
+
+JSON 상세 결과와 같은 이름의 Markdown 보고서가 생성됩니다. novel direct match는 송신한
+ID/payload가 다른 버스에서 관찰된 가장 강한 routing 근거입니다. 다른 ID의 신규 payload,
+전송률 변화, recovery 여부는 반응 후보이며 인과관계를 단독으로 증명하지는 않습니다.
+
+
+12. 문제 해결
 -------------
 
 "필수 패키지가 없습니다"
   source .venv/bin/activate 후 requirements.txt를 다시 설치합니다.
 
 "DBC 파일을 찾을 수 없습니다"
-  저장소 전체를 복사했는지 확인합니다. pi_can_lab과 dbc가 같은 상위 폴더에 있어야 합니다.
+  저장소 전체를 복사했고 저장소 루트에 A5.dbc가 있는지 확인합니다.
 
 "원본 프레임을 수신하지 못했습니다"
   잘못된 버스, bitrate, ID 또는 I-CAN DBC를 B-CAN에 적용한 경우일 수 있습니다.
@@ -234,5 +330,6 @@ CRC, checksum, counter, *_BZ 같은 신호가 들어 있는 메시지는 단순 
 "decode_error"
   DLC가 DBC 정의와 다르거나 해당 버스/차량 버전에 맞지 않는 DBC일 수 있습니다.
 
-세 Pi 로그의 시간을 비교하려면 NTP/chrony 상태를 확인하고, 각 실험 시작/종료 시각을
-기록하십시오. 다음 단계에서는 이 세 JSONL을 trial 단위로 자동 병합할 수 있습니다.
+여러 장비 로그의 시간을 비교하려면 NTP/chrony 상태를 확인하고, 각 실험 시작/종료 시각을
+기록하십시오. analyze_fuzz_response.py는 마지막 TX session을 선택해 수신 로그와 자동으로
+시간 상관분석합니다.

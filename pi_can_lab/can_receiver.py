@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -59,6 +61,20 @@ def choose(cli_value: Any, config_value: Any, default: Any) -> Any:
     return cli_value if cli_value is not None else (config_value if config_value is not None else default)
 
 
+def validate_runtime_number(
+    value: float,
+    field_name: str,
+    minimum: float = 0.0,
+    allow_equal: bool = True,
+) -> None:
+    if not math.isfinite(value):
+        raise ConfigurationError(f"{field_name}은(는) 유한한 숫자여야 합니다.")
+    invalid = value < minimum if allow_equal else value <= minimum
+    if invalid:
+        comparator = "이상" if allow_equal else "초과"
+        raise ConfigurationError(f"{field_name}은(는) {minimum:g} {comparator}이어야 합니다.")
+
+
 def resolve_watch(
     database: Any,
     raw_ids: List[Any],
@@ -88,13 +104,19 @@ def resolve_watch(
     return ids, signals
 
 
-def frame_record(message: Any, bus_name: str, channel: str) -> Dict[str, Any]:
+def frame_record(
+    message: Any,
+    bus_name: str,
+    channel: str,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
     record = {
         "record_type": "can_rx",
         **now_fields(),
         "host": hostname(),
         "bus": bus_name,
         "channel": channel,
+        "session_id": session_id,
         "can_timestamp": getattr(message, "timestamp", None),
         "arbitration_id": int(message.arbitration_id),
         "arbitration_id_hex": f"0x{message.arbitration_id:X}",
@@ -140,6 +162,12 @@ def run(args: argparse.Namespace) -> int:
     decode_all = bool(args.decode_all or rx_cfg.get("decode_all", False))
     log_all = not args.watch_only and bool(rx_cfg.get("log_all", True))
 
+    validate_runtime_number(duration, "duration_seconds")
+    validate_runtime_number(recv_timeout, "recv_timeout_seconds", allow_equal=False)
+    validate_runtime_number(stats_interval, "stats_interval_seconds")
+    if print_mode not in {"all", "decoded", "changes", "errors", "none"}:
+        raise ConfigurationError(f"지원하지 않는 print_mode입니다: {print_mode}")
+
     dbc_path = (
         resolve_path(args.dbc, None)
         if args.dbc is not None
@@ -178,6 +206,7 @@ def run(args: argparse.Namespace) -> int:
     print("[STOP]  Ctrl+C")
 
     bus = None
+    session_id = uuid.uuid4().hex
     started_mono = time.monotonic()
     last_stats = started_mono
     total = logged = decoded_count = decode_errors = 0
@@ -195,6 +224,7 @@ def run(args: argparse.Namespace) -> int:
                     "bus": bus_name,
                     "channel": channel,
                     "interface": interface_name,
+                    "session_id": session_id,
                     "dbc": str(dbc_path) if dbc_path else None,
                     "watch_ids": [f"0x{value:X}" for value in sorted(watch_ids)],
                     "watch_signals": sorted(watch_signals),
@@ -214,17 +244,24 @@ def run(args: argparse.Namespace) -> int:
                 total += 1
                 frame_id = int(message.arbitration_id)
                 watched = not watch_ids or frame_id in watch_ids
-                record = frame_record(message, bus_name, channel)
+                record = frame_record(message, bus_name, channel, session_id)
                 decoded_values: Optional[Dict[str, Any]] = None
                 display_values: Optional[Dict[str, Any]] = None
 
-                if database is not None and (decode_all or frame_id in watch_ids):
+                if (
+                    database is not None
+                    and not message.is_error_frame
+                    and not message.is_remote_frame
+                    and (decode_all or frame_id in watch_ids)
+                ):
                     try:
                         definition = database.get_message_by_frame_id(frame_id)
-                        decoded_values = definition.decode(
+                        raw_decoded = definition.decode(
                             bytes(message.data), decode_choices=False, scaling=True
                         )
-                        decoded_values = {key: json_safe(value) for key, value in decoded_values.items()}
+                        decoded_values = {
+                            key: json_safe(value) for key, value in raw_decoded.items()
+                        }
                         record["message_name"] = definition.name
                         record["signals"] = decoded_values
                         decoded_count += 1
@@ -275,6 +312,7 @@ def run(args: argparse.Namespace) -> int:
                     **now_fields(),
                     "host": hostname(),
                     "bus": bus_name,
+                    "session_id": session_id,
                     "received": total,
                     "logged": logged,
                     "decoded": decoded_count,
@@ -293,6 +331,7 @@ def run(args: argparse.Namespace) -> int:
                     **now_fields(),
                     "host": hostname(),
                     "bus": bus_name,
+                    "session_id": session_id,
                     "received": total,
                     "logged": logged,
                     "decoded": decoded_count,

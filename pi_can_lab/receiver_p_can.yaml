@@ -3,9 +3,9 @@ bus:
   channel: can0
 
 receiver:
-  bus_name: i_can
+  bus_name: p_can
   dbc: ../A5.dbc
-  output: logs/i_can.jsonl
+  output: logs/p_can.jsonl
   duration_seconds: 0
   recv_timeout_seconds: 1.0
   stats_interval_seconds: 5.0

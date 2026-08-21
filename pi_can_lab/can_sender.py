@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import math
+import random
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fd", action="store_true", help="raw payload를 CAN FD 프레임으로 송신")
     parser.add_argument("--no-restore", action="store_true", help="DBC patch 후 원본 payload 복원 송신 안 함")
     parser.add_argument("--allow-protected", action="store_true", help="CRC/counter 추정 신호가 있는 DBC 메시지 patch 허용")
+    parser.add_argument("--mutate", action="store_true", help="상위 저장소 Mutator로 payload mutation 생성")
+    parser.add_argument("--max-operations", type=int, help="mutation payload 하나당 최대 연산 수")
+    parser.add_argument("--allow-dlc-change", action="store_true", help="mutation 중 DLC 변경 허용")
+    parser.add_argument("--include-original", action="store_true", help="mutation 목록 첫 항목에 seed payload 포함")
+    parser.add_argument("--random-seed", type=int, help="재현 가능한 mutation 난수 seed")
     parser.add_argument("--execute", action="store_true", help="실제로 CAN 버스에 송신 (없으면 preview만 수행)")
     return parser
 
@@ -60,21 +69,49 @@ def choose(cli_value: Any, config_value: Any, default: Any) -> Any:
     return cli_value if cli_value is not None else (config_value if config_value is not None else default)
 
 
-def capture_live_payload(bus: Any, frame_id: int, is_extended: bool, timeout: float) -> bytes:
-    print(f"[BASE] 0x{frame_id:X} 원본 프레임을 최대 {timeout:.1f}초 기다립니다...")
+def capture_live_payload(
+    bus: Any,
+    frame_id: int,
+    is_extended: bool,
+    timeout: float,
+    sample_count: int = 1,
+    min_mode_ratio: float = 1.0,
+) -> bytes:
+    if sample_count < 1:
+        raise ConfigurationError("base sample_count는 1 이상이어야 합니다.")
+    if not math.isfinite(min_mode_ratio) or not 0.0 < min_mode_ratio <= 1.0:
+        raise ConfigurationError("base min_mode_ratio는 0 초과 1 이하여야 합니다.")
+    print(
+        f"[BASE] 0x{frame_id:X} 원본 프레임 {sample_count}개를 "
+        f"최대 {timeout:.1f}초 기다립니다..."
+    )
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    samples: List[bytes] = []
+    while time.monotonic() < deadline and len(samples) < sample_count:
         message = bus.recv(timeout=min(0.5, max(0.0, deadline - time.monotonic())))
         if message is None:
             continue
         if int(message.arbitration_id) == frame_id and bool(message.is_extended_id) == is_extended:
-            payload = bytes(message.data)
-            print(f"[BASE] 수신 완료: {payload.hex().upper()}")
-            return payload
-    raise RuntimeError(
-        f"{timeout:.1f}초 동안 CAN ID 0x{frame_id:X}를 수신하지 못했습니다. "
-        "버스/bitrate/DBC가 맞는지 확인하세요."
+            samples.append(bytes(message.data))
+    if len(samples) < sample_count:
+        raise RuntimeError(
+            f"{timeout:.1f}초 동안 CAN ID 0x{frame_id:X}를 "
+            f"{sample_count}개 중 {len(samples)}개만 수신했습니다. "
+            "버스/bitrate/DBC가 맞는지 확인하세요."
+        )
+    payload, occurrences = Counter(samples).most_common(1)[0]
+    mode_ratio = occurrences / len(samples)
+    if mode_ratio < min_mode_ratio:
+        raise RuntimeError(
+            f"CAN ID 0x{frame_id:X} baseline이 불안정합니다: "
+            f"mode_ratio={mode_ratio:.3f} < {min_mode_ratio:.3f}. "
+            "다른 송신/fuzzer가 없는 상태에서 다시 수집하세요."
+        )
+    print(
+        f"[BASE] 수신 완료: {payload.hex().upper()} "
+        f"(mode={occurrences}/{len(samples)})"
     )
+    return payload
 
 
 def validate_length(payload: bytes, is_fd: bool, expected: Optional[int] = None) -> None:
@@ -85,6 +122,109 @@ def validate_length(payload: bytes, is_fd: bool, expected: Optional[int] = None)
         )
     if expected is not None and len(payload) != expected:
         raise ConfigurationError(f"DBC 메시지는 {expected}바이트지만 payload는 {len(payload)}바이트입니다.")
+
+
+def validate_finite(
+    value: float,
+    field_name: str,
+    minimum: float = 0.0,
+    allow_equal: bool = True,
+) -> None:
+    if not math.isfinite(value):
+        raise ConfigurationError(f"{field_name}은(는) 유한한 숫자여야 합니다.")
+    invalid = value < minimum if allow_equal else value <= minimum
+    if invalid:
+        comparator = "이상" if allow_equal else "초과"
+        raise ConfigurationError(f"{field_name}은(는) {minimum:g} {comparator}이어야 합니다.")
+
+
+def mutation_summary(base_payload: bytes, payload: bytes) -> Dict[str, Any]:
+    overlap = min(len(base_payload), len(payload))
+    xor_bytes = bytes(
+        base_payload[index] ^ payload[index]
+        for index in range(overlap)
+    )
+    changed = [index for index, value in enumerate(xor_bytes) if value]
+    changed.extend(range(overlap, max(len(base_payload), len(payload))))
+    return {
+        "length_delta": len(payload) - len(base_payload),
+        "changed_byte_indexes": changed,
+        "xor_hex": xor_bytes.hex().upper(),
+        "changed_bit_count": sum(value.bit_count() for value in xor_bytes),
+    }
+
+
+def repository_mutator() -> Any:
+    """Load the repository Mutator while keeping pi_can_lab directly executable."""
+    repository_root = Path(__file__).resolve().parent.parent
+    root_text = str(repository_root)
+    if root_text not in sys.path:
+        sys.path.insert(0, root_text)
+    try:
+        return importlib.import_module("src.mutation.mutator").Mutator
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "상위 저장소의 src.mutation.mutator.Mutator를 불러오지 못했습니다. "
+            "pi_can_lab만 복사하지 말고 저장소 전체를 사용하세요."
+        ) from exc
+
+
+def generate_mutations(
+    base_payload: bytes,
+    count: int,
+    max_operations: int,
+    allow_dlc_change: bool,
+    include_original: bool,
+    random_seed: Optional[int],
+) -> List[bytes]:
+    """Generate mutations with the same engine used by the repository fuzzer."""
+    if max_operations < 1:
+        raise ConfigurationError("max_operations는 1 이상이어야 합니다.")
+
+    # The upstream Mutator may emit the unchanged base after a no-op. Request one
+    # spare result and filter it explicitly when include_original is false.
+    requested_budget = count if include_original else count + 1
+    weights = {
+        "manager.budget": requested_budget,
+        "manager.max_ops": max_operations,
+        "manager.structural": allow_dlc_change,
+        "manager.include_original": include_original,
+    }
+    random_state = random.getstate()
+    try:
+        if random_seed is not None:
+            random.seed(random_seed)
+        generated = repository_mutator()(
+            data=base_payload,
+            weights=weights,
+            min_length=1,
+        ).mutate_manager()
+    finally:
+        random.setstate(random_state)
+
+    payloads: List[bytes] = []
+    seen: set[bytes] = set()
+    for payload in generated:
+        item = bytes(payload)
+        if not allow_dlc_change and len(item) != len(base_payload):
+            continue
+        if not include_original and item == base_payload:
+            continue
+        if item not in seen:
+            seen.add(item)
+            payloads.append(item)
+        if len(payloads) == count:
+            break
+
+    if include_original and base_payload not in seen:
+        payloads.insert(0, base_payload)
+        payloads = payloads[:count]
+    if len(payloads) != count:
+        raise RuntimeError(
+            f"요청한 mutation {count}개 중 {len(payloads)}개만 생성됐습니다. "
+            "count 또는 max_operations를 조정하세요."
+        )
+    return payloads
 
 
 def load_assignments(configured: Any, command_line: List[str]) -> Dict[str, Any]:
@@ -129,6 +269,7 @@ def tx_record(
     message_name: Optional[str] = None,
     signals: Optional[Dict[str, Any]] = None,
     kind: str = "inject",
+    mutation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "record_type": "can_tx",
@@ -147,6 +288,7 @@ def tx_record(
         "is_fd": is_fd,
         "message_name": message_name,
         "signals": signals,
+        "mutation": mutation,
     }
 
 
@@ -157,6 +299,7 @@ def run(args: argparse.Namespace) -> int:
     base_cfg = tx_cfg.get("base", {})
     transmit_cfg = tx_cfg.get("transmit", {})
     safety_cfg = tx_cfg.get("safety", {})
+    mutation_cfg = tx_cfg.get("mutation", {})
 
     interface_name = choose(args.interface_name, bus_cfg.get("interface"), "socketcan")
     channel = choose(args.channel, bus_cfg.get("channel"), "can0")
@@ -167,9 +310,18 @@ def run(args: argparse.Namespace) -> int:
     max_count = int(safety_cfg.get("max_count", 100))
     min_interval_ms = float(safety_cfg.get("min_interval_ms", 10.0))
     allow_protected = bool(args.allow_protected or safety_cfg.get("allow_protected_dbc_patch", False))
+    mutation_enabled = bool(args.mutate or mutation_cfg.get("enabled", False))
+    max_operations = int(choose(args.max_operations, mutation_cfg.get("max_operations"), 3))
+    allow_dlc_change = bool(args.allow_dlc_change or mutation_cfg.get("allow_dlc_change", False))
+    include_original = bool(args.include_original or mutation_cfg.get("include_original", False))
+    random_seed_value = choose(args.random_seed, mutation_cfg.get("random_seed"), None)
+    random_seed = int(random_seed_value) if random_seed_value is not None else None
 
     if count < 1 or count > max_count:
         raise ConfigurationError(f"count는 1~{max_count} 범위여야 합니다.")
+    validate_finite(interval_ms, "interval_ms")
+    validate_finite(send_timeout, "send_timeout_seconds")
+    validate_finite(min_interval_ms, "min_interval_ms")
     if count > 1 and interval_ms < min_interval_ms:
         raise ConfigurationError(
             f"반복 송신 interval_ms는 안전 제한 {min_interval_ms:g}ms 이상이어야 합니다."
@@ -236,11 +388,21 @@ def run(args: argparse.Namespace) -> int:
 
         base_mode = choose(args.base, base_cfg.get("mode"), "live")
         base_timeout = float(choose(args.base_timeout, base_cfg.get("timeout_seconds"), 5.0))
+        validate_finite(base_timeout, "base timeout", allow_equal=False)
+        base_sample_count = int(base_cfg.get("sample_count", 1))
+        base_min_mode_ratio = float(base_cfg.get("min_mode_ratio", 1.0))
         base_data_value = args.base_data if args.base_data is not None else base_cfg.get("data")
 
         if base_mode == "live":
             bus = open_can_bus(interface_name, channel, receive_own_messages=False)
-            base_payload = capture_live_payload(bus, frame_id, is_extended, base_timeout)
+            base_payload = capture_live_payload(
+                bus,
+                frame_id,
+                is_extended,
+                base_timeout,
+                base_sample_count,
+                base_min_mode_ratio,
+            )
         elif base_mode == "data":
             if base_data_value is None:
                 raise ConfigurationError("base mode가 data이면 base-data가 필요합니다.")
@@ -259,7 +421,29 @@ def run(args: argparse.Namespace) -> int:
             base_values = definition.decode(base_payload, decode_choices=False, scaling=True)
             patched_values = dict(base_values)
             patched_values.update(assignments)
-            payload = bytes(definition.encode(patched_values, scaling=True, padding=False, strict=True))
+            encoded_base = bytes(
+                definition.encode(base_values, scaling=True, padding=False, strict=True)
+            )
+            encoded_patch = bytes(
+                definition.encode(patched_values, scaling=True, padding=False, strict=True)
+            )
+            # Apply only the DBC-computed signal delta to the original bytes. This
+            # preserves reserved/unmodelled bits that decode -> encode cannot retain.
+            payload = bytes(
+                original ^ before ^ after
+                for original, before, after in zip(
+                    base_payload, encoded_base, encoded_patch
+                )
+            )
+            verified = definition.decode(payload, decode_choices=False, scaling=True)
+            mismatched = [
+                name for name, expected in assignments.items()
+                if verified.get(name) != expected
+            ]
+            if mismatched:
+                raise ValueError(
+                    "patch 검증 실패 신호: " + ", ".join(sorted(mismatched))
+                )
         except Exception as exc:
             raise RuntimeError(f"DBC payload patch 실패: {type(exc).__name__}: {exc}") from exc
 
@@ -278,15 +462,39 @@ def run(args: argparse.Namespace) -> int:
     restore = bool(transmit_cfg.get("restore_original", True)) and not args.no_restore
     restore_count = max(1, int(transmit_cfg.get("restore_count", 1)))
     restore_delay_ms = max(0.0, float(transmit_cfg.get("restore_delay_ms", interval_ms)))
+    validate_finite(restore_delay_ms, "restore_delay_ms")
     execute = bool(args.execute)
 
-    print(f"[MODE]  {'RAW' if raw_mode else 'DBC PATCH'} / {'EXECUTE' if execute else 'PREVIEW'}")
+    mutation_base = payload
+    if mutation_enabled:
+        payloads = generate_mutations(
+            mutation_base,
+            count,
+            max_operations,
+            allow_dlc_change,
+            include_original,
+            random_seed,
+        )
+        for item in payloads:
+            validate_length(item, is_fd)
+    else:
+        payloads = [payload] * count
+
+    mode_name = "RAW" if raw_mode else "DBC PATCH"
+    if mutation_enabled:
+        mode_name += " + REPOSITORY MUTATOR"
+    print(f"[MODE]  {mode_name} / {'EXECUTE' if execute else 'PREVIEW'}")
     print(f"[BUS]   {interface_name}:{channel} ({bus_name})")
     print(f"[FRAME] ID=0x{frame_id:X}, DLC={len(payload)}, DATA={payload.hex().upper()}")
     if definition is not None:
         print(f"[DBC]   {definition.name} / set={assignments}")
         print(f"[BASE]  {base_payload.hex().upper() if base_payload is not None else '-'}")
-    print(f"[TX]    count={count}, interval={interval_ms:g}ms, restore={bool(restore and base_payload is not None)}")
+    print(f"[TX]    count={len(payloads)}, interval={interval_ms:g}ms, restore={bool(restore and base_payload is not None)}")
+    if mutation_enabled:
+        print(
+            f"[MUT]   max_ops={max_operations}, structural={allow_dlc_change}, "
+            f"include_seed={include_original}, random_seed={random_seed}"
+        )
     print(f"[LOG]   {output_path}")
     if not execute:
         print("[SAFE]  PREVIEW이므로 송신하지 않습니다. 확인 후 --execute를 추가하세요.")
@@ -308,32 +516,80 @@ def run(args: argparse.Namespace) -> int:
                     "execute": execute,
                     "dbc": str(dbc_path) if dbc_path else None,
                     "protected_signals": protected,
+                    "mutation": {
+                        "enabled": mutation_enabled,
+                        "base_data_hex": mutation_base.hex().upper(),
+                        "max_operations": max_operations,
+                        "allow_dlc_change": allow_dlc_change,
+                        "include_original": include_original,
+                        "random_seed": random_seed,
+                    },
                 },
             )
-            for sequence in range(1, count + 1):
+            for sequence, current_payload in enumerate(payloads, start=1):
+                attempt_ns = time.time_ns()
                 if execute:
-                    message = create_message(frame_id, payload, is_extended, is_fd, bitrate_switch)
-                    bus.send(message, timeout=send_timeout)
-                    status = "sent"
+                    assert bus is not None
+                    message = create_message(frame_id, current_payload, is_extended, is_fd, bitrate_switch)
+                    try:
+                        bus.send(message, timeout=send_timeout)
+                        status = "sent"
+                    except Exception as exc:
+                        failed = tx_record(
+                            bus_name,
+                            channel,
+                            frame_id,
+                            current_payload,
+                            is_extended,
+                            is_fd,
+                            "send_error",
+                            sequence,
+                            message_name_arg,
+                            assignments if assignments else None,
+                            kind="mutation" if mutation_enabled else "inject",
+                            mutation=(
+                                mutation_summary(mutation_base, current_payload)
+                                if mutation_enabled else None
+                            ),
+                        )
+                        failed["send_attempt_wall_time_ns"] = attempt_ns
+                        failed["error"] = f"{type(exc).__name__}: {exc}"
+                        write_jsonl(handle, failed)
+                        handle.flush()
+                        raise
                 else:
                     status = "preview"
-                write_jsonl(
-                    handle,
-                    tx_record(
-                        bus_name,
-                        channel,
-                        frame_id,
-                        payload,
-                        is_extended,
-                        is_fd,
-                        status,
-                        sequence,
-                        message_name_arg,
-                        assignments if assignments else None,
+                kind = "inject"
+                if mutation_enabled:
+                    kind = "seed" if current_payload == mutation_base else "mutation"
+                record = tx_record(
+                    bus_name,
+                    channel,
+                    frame_id,
+                    current_payload,
+                    is_extended,
+                    is_fd,
+                    status,
+                    sequence,
+                    message_name_arg,
+                    assignments if assignments else None,
+                    kind=kind,
+                    mutation=(
+                        mutation_summary(mutation_base, current_payload)
+                        if mutation_enabled else None
                     ),
                 )
-                print(f"[TX {sequence:03}/{count:03}] {status.upper()} 0x{frame_id:X}#{payload.hex().upper()}")
-                if sequence < count:
+                record["send_attempt_wall_time_ns"] = attempt_ns
+                write_jsonl(
+                    handle,
+                    record,
+                )
+                handle.flush()
+                print(
+                    f"[TX {sequence:03}/{len(payloads):03}] {status.upper()} "
+                    f"0x{frame_id:X}#{current_payload.hex().upper()}"
+                )
+                if sequence < len(payloads):
                     time.sleep(interval_ms / 1000.0)
 
             if restore and base_payload is not None:
@@ -341,6 +597,7 @@ def run(args: argparse.Namespace) -> int:
                     time.sleep(restore_delay_ms / 1000.0)
                 for sequence in range(1, restore_count + 1):
                     if execute:
+                        assert bus is not None
                         message = create_message(
                             frame_id, base_payload, is_extended, is_fd, bitrate_switch
                         )
@@ -369,6 +626,18 @@ def run(args: argparse.Namespace) -> int:
                     )
                     if sequence < restore_count:
                         time.sleep(interval_ms / 1000.0)
+            write_jsonl(
+                handle,
+                {
+                    "record_type": "tx_session_end",
+                    **now_fields(),
+                    "host": hostname(),
+                    "bus": bus_name,
+                    "status": "completed",
+                    "execute": execute,
+                    "planned": len(payloads),
+                },
+            )
             handle.flush()
     finally:
         if bus is not None:

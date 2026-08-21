@@ -4,7 +4,7 @@ bus:
 
 receiver:
   bus_name: b_can
-  dbc: ../dbc/MLBevo_Gen2_ICAN_KMatrix.dbc
+  dbc: ../A5.dbc
   output: logs/b_can.jsonl
   duration_seconds: 0
   recv_timeout_seconds: 1.0
