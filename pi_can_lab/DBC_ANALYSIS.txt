@@ -1,0 +1,113 @@
+제공된 DBC의 Hazard 관련 분석
+==============================
+
+분석 대상
+---------
+
+  dbc/MLBevo_Gen2_ICAN_KMatrix.dbc
+  원본명: MLBevo_Gen2 / ICAN KMatrix / V8.21.01F / 2021-01-29
+  메시지 정의 수: 561
+  신호 정의 수: 4511
+
+중요: 파일명과 메시지 송수신 매트릭스상 이 파일은 I-CAN용입니다. 이 분석 결과를
+B-CAN의 확정 ID 목록으로 취급하면 안 됩니다. B-CAN에서 동일 ID가 실제로 수신되는지
+먼저 관찰해야 합니다.
+
+
+핵심 Hazard 후보 1: 물리 버튼 입력
+-----------------------------------
+
+  CAN ID       0x65A (decimal 1626)
+  Message      BCM_01
+  Frame type   Standard 11-bit CAN
+  DLC          8 bytes
+  DBC sender   Gateway, Gateway_PAG
+  Cycle time   1000ms (DBC 값)
+  Signal       BCM1_Warnblink_Taster
+  Start/length bit 25 / 1
+  Byte order   Intel little-endian
+  Factor/offset 1 / 0
+  Range        0..1
+  DBC receiver ZR_High
+  의미         Warnblinktaster, 즉 Hazard 스위치 입력 상태 후보
+
+start bit 25이므로 0부터 세는 네 번째 바이트(byte index 3)의 bit 1입니다. 다른 신호를
+모두 그대로 유지한다고 가정하면 이 신호를 1로 설정할 때 해당 바이트에 0x02가 적용됩니다.
+코드는 직접 bit mask를 하드코딩하지 않고 cantools DBC encode를 사용합니다.
+
+이 메시지 정의에는 CRC/checksum/counter/*_BZ 신호가 없습니다. 그래도 BCM_01에는 여러
+차량 상태 신호가 함께 있으므로 00 00 00 00 00 00 00 00 같은 고정 payload를 사용하지
+않고 실제 수신 frame을 기준으로 Hazard bit만 변경해야 합니다.
+
+
+핵심 Hazard 후보 2: 실제 점멸 모드/상태
+----------------------------------------
+
+  CAN ID       0x366 (decimal 870)
+  Message      Blinkmodi_02
+  Frame type   Standard 11-bit CAN
+  DLC          8 bytes
+  DBC sender   Gateway, Gateway_PAG
+  Cycle time   1000ms (DBC 값)
+  Signal       BM_Warnblinken
+  Start/length bit 20 / 1
+  Byte order   Intel little-endian
+  Factor/offset 1 / 0
+  Range        0..1
+  DBC receiver ZR_High
+  의미         Warnblinken, 즉 Hazard 점멸 모드 활성 상태 후보
+
+start bit 20이므로 세 번째 바이트(byte index 2)의 bit 4이며 mask는 0x10입니다.
+Blinkmodi_02에는 좌/우 방향지시, crash, panic, emergency braking, vehicle/cluster blink
+clock 등 여러 점멸 관련 신호가 함께 들어 있습니다. 반드시 현재 frame에서 한 신호만
+DBC patch해야 합니다.
+
+이 메시지 정의에도 CRC/checksum/counter/*_BZ 신호는 없습니다. DBC에 기록된 message
+cycle time은 1000ms입니다. 단, 실제 차량 variant와 gateway 동작에 따라 달라질 수 있으므로
+정상 차량에서 실제 수신 주기를 함께 측정해야 합니다.
+
+
+두 후보의 관계
+---------------
+
+  0x65A / BCM1_Warnblink_Taster = 사용자가 버튼을 눌렀다는 입력 후보
+  0x366 / BM_Warnblinken        = Hazard 기능이 활성화됐다는 상태 후보
+
+정상 버튼 실험에서 예상하는 순서는 다음과 같습니다.
+
+  1) BCM1_Warnblink_Taster: 0 -> 1 -> 0
+  2) BM_Warnblinken:        0 -> 1
+  3) 좌/우 blink clock 신호가 함께 toggle
+  4) 다시 버튼을 누르면 BM_Warnblinken: 1 -> 0
+
+이는 DBC 이름과 설명을 바탕으로 한 후보 관계이며 실제 차량에서 검증해야 합니다.
+
+
+그 밖의 Warnblinken 관련 후보
+-----------------------------
+
+  0x1F0 EA_02       / zFAS_Warnblinken / bit 26, length 2
+    zFAS/Emergency Assist가 Hazard를 요청하는 신호 후보입니다. CRC와 BZ가 포함됩니다.
+
+  0x1A2 ESP_15      / VMM_Warnblinken / bit 24, length 1
+    Vehicle Motion Manager 기능의 Hazard 요청 후보입니다. CRC와 BZ가 포함됩니다.
+
+  0x5A7 TM_01       / TM_Warnblinken / bit 51, length 1
+    Remote/Telematics Hazard 요청 후보입니다.
+
+위 후보들은 물리 Hazard 버튼의 일반적인 첫 실험 대상이 아닙니다. 특히 CRC/BZ가 있는
+0x1F0과 0x1A2는 신호 bit만 변경하면 정상 ECU가 무시할 가능성이 높습니다.
+
+
+내일 실험에서 먼저 확정할 내용
+-------------------------------
+
+  1) B/I/C-CAN 각각의 실제 bitrate와 Classic CAN/CAN FD 여부
+  2) B-CAN에서 0x65A 또는 0x366이 실제로 관찰되는지
+  3) 실제 Hazard 버튼 조작 시 어느 ID/신호가 변화하는지
+  4) 세 Pi의 시간 동기화 상태
+  5) 정상 frame 주기와 payload baseline
+
+수신기는 모든 raw ID를 저장하므로 후보 ID가 틀려도 데이터가 사라지지 않습니다. Hazard
+버튼을 누른 시각 전후의 raw 로그를 비교하면 B-CAN에서 사용하는 실제 ID를 다시 찾을 수
+있습니다.
