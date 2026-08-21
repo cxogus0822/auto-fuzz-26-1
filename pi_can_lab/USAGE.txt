@@ -18,6 +18,7 @@ Raspberry Pi B/I/P/C-CAN 실험 도구 사용법
   sender_hazard_status.yaml   0x366 Hazard 상태 후보 송신 설정
   sender_hazard_mutation.yaml 상위 Mutator 기반 0x366 mutation 설정
   analyze_fuzz_response.py    TX manifest와 I/P-CAN 로그 상관분석
+  FUZZ_ANALYSIS.md            회차별 로그/보고서와 유의미한 결과 판정 기준
   DBC_ANALYSIS.txt            제공된 DBC의 Hazard 관련 분석
 
 같은 can_receiver.py를 각 수신 장비에서 실행하며 YAML만 다르게 사용합니다.
@@ -171,8 +172,10 @@ Ctrl+C로 종료합니다. 기본 설정은 모든 raw 프레임을 다음 파�
 화면에는 Hazard 후보 신호가 처음 관찰되거나 값이 바뀔 때만 출력됩니다. 화면에 보이지
 않는 ID도 log_all: true 설정 때문에 JSONL에는 저장됩니다.
 
-각 실험 전에 기존 JSONL을 보관하거나 YAML의 output 파일명을 바꾸십시오. 동일한 파일이
-있으면 새 세션은 파일 끝에 추가됩니다.
+각 실행은 기존 JSONL에 append하지 않고 `b_can_1.jsonl`, `b_can_2.jsonl`처럼 다음 번호의
+새 파일을 생성합니다. 정상 종료 또는 Ctrl+C 시 같은 번호의 `b_can_1.md` 요약 보고서도
+자동 생성됩니다. I/P/C-CAN도 같은 규칙을 사용합니다. 여러 장비 로그는 파일 번호가 아니라
+동일한 `--experiment-id`로 묶으십시오. 상세 판정 기준은 FUZZ_ANALYSIS.md를 참고하십시오.
 
 
 6. 첫 번째 안전한 확인 절차
@@ -224,8 +227,10 @@ preview의 ID, BASE, 변경 DATA를 확인한 뒤에만 --execute를 붙입니�
 
 sender_hazard_mutation.yaml은 B-CAN에서 수신한 0x366 live payload를 A5.dbc로 해석하고,
 BM_Warnblinken=1을 적용한 payload를 상위 저장소 Mutator의 seed로 사용합니다. 기본값은
-seed를 첫 프레임으로 포함한 뒤 총 256개를 생성하며 DLC 8을 유지합니다. random_seed=366
-이므로 같은 base payload에서는 같은 mutation 목록을 재현할 수 있습니다.
+seed를 첫 프레임으로 포함한 뒤 총 256개를 생성하며 DLC 8을 유지합니다. 실제 송신 시에는
+이 mutation corpus를 10ms 간격으로 순환하여 30초 동안 계속 송신합니다. random_seed=366
+이므로 같은 base payload에서는 같은 mutation 목록을 재현할 수 있습니다. preview는 30초를
+기다리지 않고 256개 corpus를 한 번만 표시합니다.
 
 먼저 preview:
 
@@ -306,7 +311,8 @@ PC로 복사한 뒤 baseline 10초, 마지막 송신 후 반응 2초, recovery 1
     --dbc A5.dbc \
     --output pi_can_lab/logs/hazard_response.json
 
-JSON 상세 결과와 같은 이름의 Markdown 보고서가 생성됩니다. novel direct match는 송신한
+JSON 상세 결과와 같은 이름의 Markdown 보고서가 생성됩니다. `--output`을 생략하면
+`fuzz_response_1.json/.md`, 다음 실행은 `_2`처럼 새 쌍을 만듭니다. novel direct match는 송신한
 ID/payload가 다른 버스에서 관찰된 가장 강한 routing 근거입니다. 다른 ID의 신규 payload,
 전송률 변화, recovery 여부는 반응 후보이며 인과관계를 단독으로 증명하지는 않습니다.
 

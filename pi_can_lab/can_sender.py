@@ -9,9 +9,10 @@ import math
 import random
 import sys
 import time
+import uuid
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from can_common import (
     ConfigurationError,
@@ -24,6 +25,7 @@ from can_common import (
     parse_can_data,
     parse_int,
     protected_signal_names,
+    reserve_output_path,
     require_module,
     resolve_message,
     resolve_path,
@@ -36,7 +38,7 @@ from can_common import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="B-CAN에 제한된 횟수로 raw 또는 DBC 기반 CAN 프레임을 송신합니다."
+        description="B-CAN에 제한된 횟수 또는 시간 동안 raw/DBC 기반 CAN 프레임을 송신합니다."
     )
     parser.add_argument("--config", help="sender YAML 설정 파일")
     parser.add_argument("--channel", help="SocketCAN 채널 (기본: can0)")
@@ -49,9 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base", choices=("live", "zero", "data"), help="DBC patch의 기준 payload")
     parser.add_argument("--base-data", help="--base data일 때 기준 payload")
     parser.add_argument("--base-timeout", type=float, help="live 기준 프레임 대기 시간(초)")
-    parser.add_argument("--count", type=int, help="송신 횟수")
+    parser.add_argument("--count", type=int, help="payload 수(시간 송신 시 순환할 corpus 크기)")
+    parser.add_argument("--duration", type=float, help="반복 송신 시간(초); payload 목록을 순환 송신")
     parser.add_argument("--interval-ms", type=float, help="송신 간격(ms)")
     parser.add_argument("--output", help="송신 기록 JSONL 경로")
+    parser.add_argument(
+        "--output-policy", choices=("append", "numbered", "fail"),
+        help="append, 기존 파일 거부(fail), 또는 NAME_1.jsonl 방식(numbered)",
+    )
+    parser.add_argument("--experiment-id", help="RX 로그와 공유할 실험 식별자")
     parser.add_argument("--extended", action="store_true", help="raw ID를 29-bit extended로 송신")
     parser.add_argument("--fd", action="store_true", help="raw payload를 CAN FD 프레임으로 송신")
     parser.add_argument("--no-restore", action="store_true", help="DBC patch 후 원본 payload 복원 송신 안 함")
@@ -152,6 +160,38 @@ def mutation_summary(base_payload: bytes, payload: bytes) -> Dict[str, Any]:
         "xor_hex": xor_bytes.hex().upper(),
         "changed_bit_count": sum(value.bit_count() for value in xor_bytes),
     }
+
+
+def transmission_schedule(
+    payloads: Sequence[bytes],
+    interval_seconds: float,
+    duration_seconds: Optional[float] = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> Iterator[Tuple[int, bytes]]:
+    """Yield one payload pass, or cycle payloads until the duration expires."""
+    if not payloads:
+        return
+
+    deadline = clock() + duration_seconds if duration_seconds is not None else None
+    sequence = 0
+    while deadline is None or sequence == 0 or clock() < deadline:
+        if deadline is None and sequence >= len(payloads):
+            break
+
+        yield sequence + 1, payloads[sequence % len(payloads)]
+        sequence += 1
+
+        if deadline is None:
+            if sequence < len(payloads) and interval_seconds > 0:
+                sleeper(interval_seconds)
+            continue
+
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        if interval_seconds > 0:
+            sleeper(min(interval_seconds, remaining))
 
 
 def repository_mutator() -> Any:
@@ -270,6 +310,8 @@ def tx_record(
     signals: Optional[Dict[str, Any]] = None,
     kind: str = "inject",
     mutation: Optional[Dict[str, Any]] = None,
+    tx_session_id: Optional[str] = None,
+    experiment_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "record_type": "can_tx",
@@ -277,6 +319,8 @@ def tx_record(
         "host": hostname(),
         "bus": bus_name,
         "channel": channel,
+        "tx_session_id": tx_session_id,
+        "experiment_id": experiment_id,
         "kind": kind,
         "status": status,
         "sequence": sequence,
@@ -300,14 +344,18 @@ def run(args: argparse.Namespace) -> int:
     transmit_cfg = tx_cfg.get("transmit", {})
     safety_cfg = tx_cfg.get("safety", {})
     mutation_cfg = tx_cfg.get("mutation", {})
+    analysis_cfg = tx_cfg.get("analysis", {})
 
     interface_name = choose(args.interface_name, bus_cfg.get("interface"), "socketcan")
     channel = choose(args.channel, bus_cfg.get("channel"), "can0")
     bus_name = str(tx_cfg.get("bus_name", "b_can"))
     count = int(choose(args.count, transmit_cfg.get("count"), 1))
+    duration_value = choose(args.duration, transmit_cfg.get("duration_seconds"), None)
+    duration_seconds = float(duration_value) if duration_value is not None else None
     interval_ms = float(choose(args.interval_ms, transmit_cfg.get("interval_ms"), 100.0))
     send_timeout = float(transmit_cfg.get("send_timeout_seconds", 1.0))
     max_count = int(safety_cfg.get("max_count", 100))
+    max_duration_seconds = float(safety_cfg.get("max_duration_seconds", 30.0))
     min_interval_ms = float(safety_cfg.get("min_interval_ms", 10.0))
     allow_protected = bool(args.allow_protected or safety_cfg.get("allow_protected_dbc_patch", False))
     mutation_enabled = bool(args.mutate or mutation_cfg.get("enabled", False))
@@ -316,13 +364,26 @@ def run(args: argparse.Namespace) -> int:
     include_original = bool(args.include_original or mutation_cfg.get("include_original", False))
     random_seed_value = choose(args.random_seed, mutation_cfg.get("random_seed"), None)
     random_seed = int(random_seed_value) if random_seed_value is not None else None
+    output_policy = choose(args.output_policy, tx_cfg.get("output_policy"), "append")
+    experiment_id_value = choose(
+        args.experiment_id, tx_cfg.get("experiment_id"), None
+    )
+    experiment_id = str(experiment_id_value) if experiment_id_value else None
+    tx_session_id = uuid.uuid4().hex
 
     if count < 1 or count > max_count:
         raise ConfigurationError(f"count는 1~{max_count} 범위여야 합니다.")
     validate_finite(interval_ms, "interval_ms")
     validate_finite(send_timeout, "send_timeout_seconds")
+    validate_finite(max_duration_seconds, "max_duration_seconds", allow_equal=False)
     validate_finite(min_interval_ms, "min_interval_ms")
-    if count > 1 and interval_ms < min_interval_ms:
+    if duration_seconds is not None:
+        validate_finite(duration_seconds, "duration_seconds", allow_equal=False)
+        if duration_seconds > max_duration_seconds:
+            raise ConfigurationError(
+                f"duration_seconds는 안전 제한 {max_duration_seconds:g}초 이하여야 합니다."
+            )
+    if (count > 1 or duration_seconds is not None) and interval_ms < min_interval_ms:
         raise ConfigurationError(
             f"반복 송신 interval_ms는 안전 제한 {min_interval_ms:g}ms 이상이어야 합니다."
         )
@@ -457,7 +518,7 @@ def run(args: argparse.Namespace) -> int:
         base_dir = config_path.parent if config_path else Path.cwd()
         output_path = (base_dir / "logs" / f"{bus_name}_tx_{stamp}.jsonl").resolve()
     assert output_path is not None
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = reserve_output_path(output_path, output_policy)
 
     restore = bool(transmit_cfg.get("restore_original", True)) and not args.no_restore
     restore_count = max(1, int(transmit_cfg.get("restore_count", 1)))
@@ -489,15 +550,25 @@ def run(args: argparse.Namespace) -> int:
     if definition is not None:
         print(f"[DBC]   {definition.name} / set={assignments}")
         print(f"[BASE]  {base_payload.hex().upper() if base_payload is not None else '-'}")
-    print(f"[TX]    count={len(payloads)}, interval={interval_ms:g}ms, restore={bool(restore and base_payload is not None)}")
+    duration_text = f", duration={duration_seconds:g}s (cycle)" if duration_seconds is not None else ""
+    print(
+        f"[TX]    corpus={len(payloads)}{duration_text}, interval={interval_ms:g}ms, "
+        f"restore={bool(restore and base_payload is not None)}"
+    )
     if mutation_enabled:
         print(
             f"[MUT]   max_ops={max_operations}, structural={allow_dlc_change}, "
             f"include_seed={include_original}, random_seed={random_seed}"
         )
     print(f"[LOG]   {output_path}")
+    print(f"[LOG]   policy={output_policy}, experiment_id={experiment_id or '-'}")
     if not execute:
         print("[SAFE]  PREVIEW이므로 송신하지 않습니다. 확인 후 --execute를 추가하세요.")
+        if duration_seconds is not None:
+            print(
+                f"[SAFE]  실제 실행은 {duration_seconds:g}초 동안 payload corpus를 순환하며, "
+                "preview는 corpus를 한 번만 표시합니다."
+            )
 
     try:
         if execute and bus is None:
@@ -508,14 +579,23 @@ def run(args: argparse.Namespace) -> int:
                 handle,
                 {
                     "record_type": "tx_session_start",
+                    "schema_version": 2,
                     **now_fields(),
                     "host": hostname(),
                     "bus": bus_name,
                     "interface": interface_name,
                     "channel": channel,
+                    "tx_session_id": tx_session_id,
+                    "experiment_id": experiment_id,
                     "execute": execute,
                     "dbc": str(dbc_path) if dbc_path else None,
                     "protected_signals": protected,
+                    "analysis": analysis_cfg,
+                    "transmission": {
+                        "payload_corpus_size": len(payloads),
+                        "duration_seconds": duration_seconds,
+                        "interval_ms": interval_ms,
+                    },
                     "mutation": {
                         "enabled": mutation_enabled,
                         "base_data_hex": mutation_base.hex().upper(),
@@ -526,7 +606,14 @@ def run(args: argparse.Namespace) -> int:
                     },
                 },
             )
-            for sequence, current_payload in enumerate(payloads, start=1):
+            attempted_count = 0
+            active_duration = duration_seconds if execute else None
+            for sequence, current_payload in transmission_schedule(
+                payloads,
+                interval_ms / 1000.0,
+                active_duration,
+            ):
+                attempted_count = sequence
                 attempt_ns = time.time_ns()
                 if execute:
                     assert bus is not None
@@ -551,6 +638,8 @@ def run(args: argparse.Namespace) -> int:
                                 mutation_summary(mutation_base, current_payload)
                                 if mutation_enabled else None
                             ),
+                            tx_session_id=tx_session_id,
+                            experiment_id=experiment_id,
                         )
                         failed["send_attempt_wall_time_ns"] = attempt_ns
                         failed["error"] = f"{type(exc).__name__}: {exc}"
@@ -578,6 +667,8 @@ def run(args: argparse.Namespace) -> int:
                         mutation_summary(mutation_base, current_payload)
                         if mutation_enabled else None
                     ),
+                    tx_session_id=tx_session_id,
+                    experiment_id=experiment_id,
                 )
                 record["send_attempt_wall_time_ns"] = attempt_ns
                 write_jsonl(
@@ -586,16 +677,16 @@ def run(args: argparse.Namespace) -> int:
                 )
                 handle.flush()
                 print(
-                    f"[TX {sequence:03}/{len(payloads):03}] {status.upper()} "
+                    f"[TX {sequence:06}{'' if active_duration is not None else f'/{len(payloads):06}'}] "
+                    f"{status.upper()} "
                     f"0x{frame_id:X}#{current_payload.hex().upper()}"
                 )
-                if sequence < len(payloads):
-                    time.sleep(interval_ms / 1000.0)
 
             if restore and base_payload is not None:
                 if restore_delay_ms:
                     time.sleep(restore_delay_ms / 1000.0)
                 for sequence in range(1, restore_count + 1):
+                    restore_attempt_ns = time.time_ns()
                     if execute:
                         assert bus is not None
                         message = create_message(
@@ -605,21 +696,22 @@ def run(args: argparse.Namespace) -> int:
                         status = "sent"
                     else:
                         status = "preview"
-                    write_jsonl(
-                        handle,
-                        tx_record(
-                            bus_name,
-                            channel,
-                            frame_id,
-                            base_payload,
-                            is_extended,
-                            is_fd,
-                            status,
-                            sequence,
-                            message_name_arg,
-                            kind="restore",
-                        ),
+                    restore_record = tx_record(
+                        bus_name,
+                        channel,
+                        frame_id,
+                        base_payload,
+                        is_extended,
+                        is_fd,
+                        status,
+                        sequence,
+                        message_name_arg,
+                        kind="restore",
+                        tx_session_id=tx_session_id,
+                        experiment_id=experiment_id,
                     )
+                    restore_record["send_attempt_wall_time_ns"] = restore_attempt_ns
+                    write_jsonl(handle, restore_record)
                     print(
                         f"[RESTORE {sequence:03}/{restore_count:03}] "
                         f"{status.upper()} 0x{frame_id:X}#{base_payload.hex().upper()}"
@@ -630,12 +722,18 @@ def run(args: argparse.Namespace) -> int:
                 handle,
                 {
                     "record_type": "tx_session_end",
+                    "schema_version": 2,
                     **now_fields(),
                     "host": hostname(),
                     "bus": bus_name,
+                    "tx_session_id": tx_session_id,
+                    "experiment_id": experiment_id,
                     "status": "completed",
                     "execute": execute,
-                    "planned": len(payloads),
+                    "planned": None if active_duration is not None else len(payloads),
+                    "payload_corpus_size": len(payloads),
+                    "duration_seconds": duration_seconds,
+                    "attempted": attempted_count,
                 },
             )
             handle.flush()

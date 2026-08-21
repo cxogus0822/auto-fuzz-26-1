@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import socket
 import time
 from pathlib import Path
@@ -12,6 +13,80 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 
 class ConfigurationError(ValueError):
     """Raised when a command or YAML configuration is not usable."""
+
+
+OUTPUT_POLICIES = {"append", "numbered", "fail"}
+
+
+def reserve_output_path(base_path: Path, policy: str = "append") -> Path:
+    """Resolve an output path without accidentally mixing monitoring runs."""
+    if policy not in OUTPUT_POLICIES:
+        raise ConfigurationError(
+            f"output_policy는 {', '.join(sorted(OUTPUT_POLICIES))} 중 하나여야 합니다."
+        )
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    if policy == "append":
+        return base_path
+    if policy == "fail":
+        with base_path.open("x", encoding="utf-8"):
+            pass
+        return base_path
+
+    pattern = re.compile(
+        rf"^{re.escape(base_path.stem)}_(\d+){re.escape(base_path.suffix)}$"
+    )
+    indexes = [
+        int(match.group(1))
+        for path in base_path.parent.iterdir()
+        if path.is_file() and (match := pattern.match(path.name))
+    ]
+    index = max(indexes, default=0) + 1
+    while True:
+        candidate = base_path.with_name(
+            f"{base_path.stem}_{index}{base_path.suffix}"
+        )
+        try:
+            with candidate.open("x", encoding="utf-8"):
+                pass
+            return candidate
+        except FileExistsError:
+            index += 1
+
+
+def socketcan_error_details(error_mask: int, payload: bytes) -> Dict[str, Any]:
+    """Decode the portable parts of Linux SocketCAN error frames."""
+    class_flags = (
+        (0x00000001, "tx_timeout"),
+        (0x00000002, "lost_arbitration"),
+        (0x00000004, "controller_problem"),
+        (0x00000008, "protocol_violation"),
+        (0x00000010, "transceiver_status"),
+        (0x00000020, "no_ack"),
+        (0x00000040, "bus_off"),
+        (0x00000080, "bus_error"),
+        (0x00000100, "controller_restarted"),
+    )
+    controller_flags = (
+        (0x01, "rx_buffer_overflow"),
+        (0x02, "tx_buffer_overflow"),
+        (0x04, "rx_warning"),
+        (0x08, "tx_warning"),
+        (0x10, "rx_error_passive"),
+        (0x20, "tx_error_passive"),
+        (0x40, "error_active"),
+    )
+    classes = [name for mask, name in class_flags if error_mask & mask]
+    controller = []
+    if error_mask & 0x00000004 and len(payload) > 1:
+        controller = [name for mask, name in controller_flags if payload[1] & mask]
+    severity = "critical" if "bus_off" in classes else (
+        "warning" if classes or controller else "unknown"
+    )
+    return {
+        "classes": classes,
+        "controller_status": controller,
+        "severity": severity,
+    }
 
 
 def require_module(name: str, install_name: Optional[str] = None) -> Any:
